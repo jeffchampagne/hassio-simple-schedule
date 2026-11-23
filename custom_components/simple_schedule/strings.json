@@ -1,0 +1,16 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Simple Schedule",
+        "description": "Install the Simple Schedule companion. Optionally seed sample schedules to try the cards.",
+        "data": {
+          "create_sample": "Create sample schedules"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Simple Schedule is already configured"
+    }
+  }
+}

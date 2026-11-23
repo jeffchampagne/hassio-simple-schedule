@@ -1,0 +1,146 @@
+create_schedule:
+  name: Create schedule
+  description: Create a new simple schedule.
+  fields:
+    name:
+      required: true
+      example: Classroom hours
+      selector:
+        text:
+    object_id:
+      selector:
+        text:
+    enabled:
+      default: true
+      selector:
+        boolean:
+    weekdays:
+      selector:
+        select:
+          multiple: true
+          options:
+            - sun
+            - mon
+            - tue
+            - wed
+            - thu
+            - fri
+            - sat
+    windows:
+      selector:
+        object:
+    group_id:
+      selector:
+        text:
+
+update_schedule:
+  name: Update schedule
+  description: Update an existing schedule by id.
+  fields:
+    schedule_id:
+      required: true
+      selector:
+        text:
+    name:
+      selector:
+        text:
+    enabled:
+      selector:
+        boolean:
+    weekdays:
+      selector:
+        select:
+          multiple: true
+          options: [sun, mon, tue, wed, thu, fri, sat]
+    windows:
+      selector:
+        object:
+
+delete_schedule:
+  name: Delete schedule
+  fields:
+    schedule_id:
+      required: true
+      selector:
+        text:
+
+set_enabled:
+  name: Set enabled
+  fields:
+    schedule_id:
+      required: true
+      selector:
+        text:
+    enabled:
+      required: true
+      selector:
+        boolean:
+
+create_group:
+  name: Create group
+  fields:
+    name:
+      required: true
+      selector:
+        text:
+    member_ids:
+      selector:
+        object:
+    fallback_member_id:
+      selector:
+        text:
+    enabled_member_id:
+      selector:
+        text:
+
+update_group:
+  name: Update group
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:
+    name:
+      selector:
+        text:
+    member_ids:
+      selector:
+        object:
+    sticky:
+      selector:
+        boolean:
+
+delete_group:
+  name: Delete group
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:
+
+select_member:
+  name: Select group member
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:
+    member_id:
+      required: true
+      selector:
+        text:
+    sticky:
+      selector:
+        boolean:
+
+cycle_member:
+  name: Cycle group member selection (select → sticky → clear sticky)
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:
+    member_id:
+      required: true
+      selector:
+        text:

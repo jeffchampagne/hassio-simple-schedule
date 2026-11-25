@@ -170,6 +170,28 @@
     return out;
   }
 
+  /** Coerce HA attrs to a windows array. Never treat [] as missing via `||`. */
+  function coerceWindows(raw) {
+    if (Array.isArray(raw)) return raw.filter((w) => w && typeof w === "object");
+    if (raw && typeof raw === "object") {
+      // Rare: dict keyed by id
+      return Object.values(raw).filter((w) => w && typeof w === "object");
+    }
+    return [];
+  }
+
+  /** First non-empty windows list among candidates; else first array (maybe empty). */
+  function resolveWindows(...candidates) {
+    let empty = null;
+    for (const c of candidates) {
+      const list = coerceWindows(c);
+      if (list.length) return list;
+      if (empty == null && Array.isArray(c)) empty = list;
+      else if (empty == null && c != null) empty = list;
+    }
+    return empty || [];
+  }
+
   function clockMinuteRanges(w) {
     const from = w.from || w.start;
     const to = w.to || w.end;
@@ -758,7 +780,7 @@
     }
 
     _onCellPointer(cell, fillOnly) {
-      const windows = this._attrs.windows || [];
+      const windows = coerceWindows(this._attrs.windows);
       const q = quartersFromWindows(windows);
       const topIdx = cell * 2;
       const bottomIdx = cell * 2 + 1;
@@ -784,7 +806,7 @@
 
     _addWindow() {
       this._error = null;
-      const windows = [...(this._attrs.windows || [])];
+      const windows = [...coerceWindows(this._attrs.windows)];
       if (this._fromKind === "clock" && this._toKind === "clock") {
         const a = parseHm(this._fromClock);
         const b = parseHm(this._toClock);
@@ -835,12 +857,14 @@
     }
 
     _removeWindow(id) {
-      const windows = (this._attrs.windows || []).filter((w) => w.id !== id);
+      const windows = coerceWindows(this._attrs.windows).filter(
+        (w) => w.id !== id
+      );
       this._persist({ windows });
     }
 
     _patchWindow(id, patch) {
-      const windows = (this._attrs.windows || []).map((w) =>
+      const windows = coerceWindows(this._attrs.windows).map((w) =>
         w.id === id ? { ...w, ...patch } : w
       );
       this._persist({ windows });
@@ -856,21 +880,27 @@
     }
 
     _addWaitStep(windowId, field) {
-      const w = (this._attrs.windows || []).find((x) => x.id === windowId);
+      const w = coerceWindows(this._attrs.windows).find(
+        (x) => x.id === windowId
+      );
       if (!w) return;
       const steps = [...normalizeSteps(w[field]), { type: "wait", seconds: 30 }];
       this._setSteps(windowId, field, steps);
     }
 
     _removeStep(windowId, field, index) {
-      const w = (this._attrs.windows || []).find((x) => x.id === windowId);
+      const w = coerceWindows(this._attrs.windows).find(
+        (x) => x.id === windowId
+      );
       if (!w) return;
       const steps = normalizeSteps(w[field]).filter((_, i) => i !== index);
       this._setSteps(windowId, field, steps);
     }
 
     _updateWaitSeconds(windowId, field, index, seconds) {
-      const w = (this._attrs.windows || []).find((x) => x.id === windowId);
+      const w = coerceWindows(this._attrs.windows).find(
+        (x) => x.id === windowId
+      );
       if (!w) return;
       const steps = normalizeSteps(w[field]).map((s, i) =>
         i === index
@@ -894,7 +924,9 @@
       ev.preventDefault();
       const drag = this._stepDrag;
       if (!drag || drag.windowId !== windowId || drag.field !== field) return;
-      const w = (this._attrs.windows || []).find((x) => x.id === windowId);
+      const w = coerceWindows(this._attrs.windows).find(
+        (x) => x.id === windowId
+      );
       if (!w) return;
       const steps = normalizeSteps(w[field]);
       const from = drag.index;
@@ -959,7 +991,8 @@
       const a = this._attrs;
       const enabled = Boolean(a.enabled);
       const fmt = this._fmt;
-      const windows = a.windows || [];
+      // Defensive: never let a non-array / empty-group attr blank the Windows section
+      const windows = resolveWindows(a.windows);
       const q = quartersFromWindows(windows);
       const overnight = windows.some(isOvernight);
       const status = this._statusText();
@@ -1069,43 +1102,23 @@
                         : ""}
                     </div>
 
-                    ${windows.map((w) => {
-                      const overlaps = overlapIds.has(w.id);
-                      return html`
-                        <div class="window-card ${overlaps ? "overlap" : ""}">
-                          <div class="row">
-                            <strong
-                              >${windowLabel(w, fmt)}${isOvernight(w)
-                                ? " · overnight"
-                                : ""}</strong
-                            >
-                            ${overlaps
-                              ? html`<span class="chip overlap">Overlaps</span>`
-                              : ""}
-                            <span class="spacer"></span>
-                            <mwc-button @click=${() => this._removeWindow(w.id)}
-                              >Remove</mwc-button
-                            >
-                          </div>
-                          ${this._renderStepEditor(
-                            w,
-                            "on_start",
-                            "At start",
-                            isOvernight(w)
-                              ? "Runs on the selected start day (DOW)."
-                              : ""
-                          )}
-                          ${this._renderStepEditor(
-                            w,
-                            "on_end",
-                            "At end",
-                            isOvernight(w)
-                              ? "Still runs even if the end calendar day isn’t in DOW."
-                              : ""
-                          )}
-                        </div>
-                      `;
-                    })}
+                    <div
+                      class="muted"
+                      style="font-weight:600;margin-top:12px;margin-bottom:4px"
+                    >
+                      Windows
+                    </div>
+                    ${windows.length
+                      ? windows.map((w) =>
+                          this._renderWindowCard(w, fmt, overlapIds, {
+                            onRemove: () => this._removeWindow(w.id),
+                            onPatchSteps: (field, steps) =>
+                              this._setSteps(w.id, field, steps),
+                          })
+                        )
+                      : html`<div class="muted" style="margin-top:4px">
+                          No windows set
+                        </div>`}
 
                     <div style="margin-top:10px">
                       <div class="muted" style="font-weight:600">From</div>
@@ -1251,10 +1264,68 @@
       `;
     }
 
-    _renderStepEditor(w, field, label, hint) {
+    _renderWindowCard(w, fmt, overlapIds, handlers = {}) {
+      const overlaps = overlapIds?.has?.(w.id);
+      const onRemove = handlers.onRemove;
+      const stepApi = handlers.stepApi || null;
+      return html`
+        <div class="window-card ${overlaps ? "overlap" : ""}">
+          <div class="row">
+            <strong
+              >${windowLabel(w, fmt)}${isOvernight(w)
+                ? " · overnight"
+                : ""}</strong
+            >
+            ${overlaps ? html`<span class="chip overlap">Overlaps</span>` : ""}
+            <span class="spacer"></span>
+            ${onRemove
+              ? html`<mwc-button @click=${onRemove}>Remove</mwc-button>`
+              : ""}
+          </div>
+          ${this._renderStepEditor(
+            w,
+            "on_start",
+            "At start",
+            isOvernight(w) ? "Runs on the selected start day (DOW)." : "",
+            stepApi
+          )}
+          ${this._renderStepEditor(
+            w,
+            "on_end",
+            "At end",
+            isOvernight(w)
+              ? "Still runs even if the end calendar day isn’t in DOW."
+              : "",
+            stepApi
+          )}
+        </div>
+      `;
+    }
+
+    _renderStepEditor(w, field, label, hint, api) {
       const steps = normalizeSteps(w[field]);
       const addKey = `${w.id}:${field}:add`;
       const open = this._pickerFor === addKey;
+      const setSteps =
+        api?.setSteps ||
+        ((windowId, f, next) => this._setSteps(windowId, f, next));
+      const addWait =
+        api?.addWait || ((windowId, f) => this._addWaitStep(windowId, f));
+      const removeStep =
+        api?.removeStep ||
+        ((windowId, f, index) => this._removeStep(windowId, f, index));
+      const updateWait =
+        api?.updateWait ||
+        ((windowId, f, index, seconds) =>
+          this._updateWaitSeconds(windowId, f, index, seconds));
+      const onDragStart =
+        api?.onDragStart ||
+        ((windowId, f, index, e) =>
+          this._onStepDragStart(windowId, f, index, e));
+      const onDrop =
+        api?.onDrop ||
+        ((windowId, f, toIndex, e) =>
+          this._onStepDrop(windowId, f, toIndex, e));
       return html`
         <div style="margin-top:8px">
           <div class="muted" style="font-weight:600">${label}</div>
@@ -1266,10 +1337,9 @@
                   <div
                     class="step-row"
                     draggable="true"
-                    @dragstart=${(e) =>
-                      this._onStepDragStart(w.id, field, index, e)}
+                    @dragstart=${(e) => onDragStart(w.id, field, index, e)}
                     @dragover=${(e) => e.preventDefault()}
-                    @drop=${(e) => this._onStepDrop(w.id, field, index, e)}
+                    @drop=${(e) => onDrop(w.id, field, index, e)}
                   >
                     <span class="handle">⋮⋮</span>
                     <span class="chip">Wait ${formatWait(step.seconds)}</span>
@@ -1281,17 +1351,12 @@
                       title="Duration in seconds"
                       .value=${String(step.seconds ?? 0)}
                       @change=${(e) =>
-                        this._updateWaitSeconds(
-                          w.id,
-                          field,
-                          index,
-                          e.target.value
-                        )}
+                        updateWait(w.id, field, index, e.target.value)}
                     />
                     <span class="muted">sec</span>
                     <span class="spacer"></span>
                     <mwc-button
-                      @click=${() => this._removeStep(w.id, field, index)}
+                      @click=${() => removeStep(w.id, field, index)}
                       >Remove</mwc-button
                     >
                   </div>
@@ -1304,18 +1369,16 @@
                 <div
                   class="step-row"
                   draggable="true"
-                  @dragstart=${(e) =>
-                    this._onStepDragStart(w.id, field, index, e)}
+                  @dragstart=${(e) => onDragStart(w.id, field, index, e)}
                   @dragover=${(e) => e.preventDefault()}
-                  @drop=${(e) => this._onStepDrop(w.id, field, index, e)}
+                  @drop=${(e) => onDrop(w.id, field, index, e)}
                 >
                   <span class="handle">⋮⋮</span>
                   <div style="min-width:0;flex:1">
                     <div>${name}</div>
                     <div class="muted">${step.entity_id}</div>
                   </div>
-                  <mwc-button
-                    @click=${() => this._removeStep(w.id, field, index)}
+                  <mwc-button @click=${() => removeStep(w.id, field, index)}
                     >Remove</mwc-button
                   >
                 </div>
@@ -1323,10 +1386,14 @@
             })}
           </div>
           <div class="row" style="margin-top:6px">
-            <mwc-button @click=${() => this._addActionStep(w.id, field)}
+            <mwc-button
+              @click=${() => {
+                this._pickerFor = addKey;
+                this._pickerQuery = "";
+              }}
               >Add action</mwc-button
             >
-            <mwc-button @click=${() => this._addWaitStep(w.id, field)}
+            <mwc-button @click=${() => addWait(w.id, field)}
               >Add wait</mwc-button
             >
           </div>
@@ -1353,7 +1420,7 @@
                         ...normalizeSteps(w[field]),
                         { type: "action", entity_id: act.id },
                       ];
-                      this._setSteps(w.id, field, next);
+                      setSteps(w.id, field, next);
                       this._pickerFor = null;
                     }}
                   >
@@ -1389,6 +1456,9 @@
         _groupEdit: { type: Boolean },
         _hint: { type: String },
         _error: { type: String },
+        _pickerFor: { type: String },
+        _pickerQuery: { type: String },
+        _stepDrag: { type: Object },
       };
     }
 
@@ -1402,7 +1472,24 @@
       this._expandedId = null;
       this._groupEdit = false;
       this._error = null;
+      this._pickerFor = null;
+      this._pickerQuery = "";
+      this._stepDrag = null;
       this._hint = "Click: select → sticky → clear sticky";
+    }
+
+    // Shared window / step editors (same as solo card)
+    _renderWindowCard(...args) {
+      return SimpleScheduleCard.prototype._renderWindowCard.apply(this, args);
+    }
+    _renderStepEditor(...args) {
+      return SimpleScheduleCard.prototype._renderStepEditor.apply(this, args);
+    }
+    _actionEntities() {
+      return SimpleScheduleCard.prototype._actionEntities.call(this);
+    }
+    _filteredActions() {
+      return SimpleScheduleCard.prototype._filteredActions.call(this);
     }
 
     getCardSize() {
@@ -1430,6 +1517,110 @@
         schedule_id: memberId,
         ...patch,
       });
+    }
+
+    _memberWindows(m) {
+      const memberState = this.hass?.states?.[m.entity_id];
+      // Critical: do NOT use `m.windows || fallback` — empty [] is truthy and
+      // blanks the Windows subsection when group attrs lag member entities.
+      return resolveWindows(m.windows, memberState?.attributes?.windows);
+    }
+
+    async _persistMemberWindows(memberId, windows) {
+      await this.hass.callService("simple_schedule", "update_schedule", {
+        schedule_id: memberId,
+        windows,
+      });
+    }
+
+    _memberStepApi(memberId, windows) {
+      const persist = (nextWindows) =>
+        this._persistMemberWindows(memberId, nextWindows);
+      const mapWindow = (windowId, fn) =>
+        windows.map((w) => (w.id === windowId ? fn(w) : w));
+      return {
+        setSteps: (windowId, field, steps) => {
+          persist(
+            mapWindow(windowId, (w) => ({
+              ...w,
+              [field]: normalizeSteps(steps),
+            }))
+          );
+        },
+        addWait: (windowId, field) => {
+          const w = windows.find((x) => x.id === windowId);
+          if (!w) return;
+          persist(
+            mapWindow(windowId, (cur) => ({
+              ...cur,
+              [field]: [
+                ...normalizeSteps(cur[field]),
+                { type: "wait", seconds: 30 },
+              ],
+            }))
+          );
+        },
+        removeStep: (windowId, field, index) => {
+          persist(
+            mapWindow(windowId, (cur) => ({
+              ...cur,
+              [field]: normalizeSteps(cur[field]).filter((_, i) => i !== index),
+            }))
+          );
+        },
+        updateWait: (windowId, field, index, seconds) => {
+          persist(
+            mapWindow(windowId, (cur) => ({
+              ...cur,
+              [field]: normalizeSteps(cur[field]).map((s, i) =>
+                i === index
+                  ? {
+                      type: "wait",
+                      seconds: Math.max(0, Number(seconds) || 0),
+                    }
+                  : s
+              ),
+            }))
+          );
+        },
+        onDragStart: (windowId, field, index, ev) => {
+          this._stepDrag = { memberId, windowId, field, index };
+          ev.dataTransfer.effectAllowed = "move";
+          try {
+            ev.dataTransfer.setData("text/plain", String(index));
+          } catch {
+            /* ignore */
+          }
+        },
+        onDrop: (windowId, field, toIndex, ev) => {
+          ev.preventDefault();
+          const drag = this._stepDrag;
+          if (
+            !drag ||
+            drag.memberId !== memberId ||
+            drag.windowId !== windowId ||
+            drag.field !== field
+          )
+            return;
+          const w = windows.find((x) => x.id === windowId);
+          if (!w) return;
+          const steps = normalizeSteps(w[field]);
+          const from = drag.index;
+          if (from === toIndex || from < 0 || from >= steps.length) {
+            this._stepDrag = null;
+            return;
+          }
+          const [item] = steps.splice(from, 1);
+          steps.splice(toIndex, 0, item);
+          this._stepDrag = null;
+          persist(
+            mapWindow(windowId, (cur) => ({
+              ...cur,
+              [field]: steps,
+            }))
+          );
+        },
+      };
     }
 
     async _patchGroup(patch) {
@@ -1523,13 +1714,8 @@
               const isSticky = selected && sticky;
               const expanded = this._expandedId === m.id;
               const isFallback = m.id === fallbackId;
-              const memberState = this.hass?.states?.[m.entity_id];
-              const windows =
-                (Array.isArray(m.windows) && m.windows.length
-                  ? m.windows
-                  : null) ||
-                memberState?.attributes?.windows ||
-                [];
+              const windows = this._memberWindows(m);
+              const overlapIds = overlappingWindowIds(windows);
               const windowsSummary =
                 m.windows_summary ||
                 (windows.length
@@ -1542,6 +1728,7 @@
                 : isFallback
                   ? "Default (no dates)"
                   : "Year-round (no dates)";
+              const stepApi = this._memberStepApi(m.id, windows);
               return html`
                 <div
                   style="margin-top:8px;border:1px solid var(--divider-color);border-radius:8px;overflow:hidden"
@@ -1570,31 +1757,30 @@
                         e.stopPropagation();
                         this._expandedId = expanded ? null : m.id;
                       }}
-                      >${expanded ? "▴ Season" : "▾ Season"}</mwc-button
+                      >${expanded ? "▴ Collapse" : "▾ Expand"}</mwc-button
                     >
-                  </div>
-                  <div
-                    class="body"
-                    style="padding-top:8px;padding-bottom:${expanded
-                      ? "0"
-                      : "12px"}"
-                  >
-                    <div class="muted" style="font-weight:600">Windows</div>
-                    ${windows.length
-                      ? windows.map(
-                          (w) => html`<div class="muted" style="margin-top:4px">
-                            ${windowLabel(w, fmt)}${isOvernight(w)
-                              ? " · overnight"
-                              : ""}
-                          </div>`
-                        )
-                      : html`<div class="muted" style="margin-top:4px">
-                          No windows set
-                        </div>`}
                   </div>
                   ${expanded
                     ? html`<div class="body">
-                        <div class="muted" style="font-weight:600">
+                        <div class="muted" style="font-weight:600">Windows</div>
+                        ${windows.length
+                          ? windows.map((w) =>
+                              this._renderWindowCard(w, fmt, overlapIds, {
+                                onRemove: () =>
+                                  this._persistMemberWindows(
+                                    m.id,
+                                    windows.filter((x) => x.id !== w.id)
+                                  ),
+                                stepApi,
+                              })
+                            )
+                          : html`<div class="muted" style="margin-top:4px">
+                              No windows set
+                            </div>`}
+                        <div
+                          class="muted"
+                          style="font-weight:600;margin-top:14px"
+                        >
                           Season (dates only)
                         </div>
                         <div class="row" style="margin-top:6px">
@@ -1648,9 +1834,6 @@
                                 season_available: e.target.checked,
                               })}
                           ></ha-switch>
-                        </div>
-                        <div class="muted" style="margin-top:8px">
-                          Hours: edit via solo card on ${m.entity_id}
                         </div>
                       </div>`
                     : ""}

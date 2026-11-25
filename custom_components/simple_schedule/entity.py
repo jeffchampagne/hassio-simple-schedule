@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.core import callback
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_ACTIVE_WINDOW,
@@ -15,6 +16,7 @@ from .const import (
     ATTR_DEFAULT_ON_START,
     ATTR_ENABLED,
     ATTR_GROUP_ID,
+    ATTR_IN_SEASON,
     ATTR_NEXT_EVENT,
     ATTR_SEASON_AVAILABLE,
     ATTR_WEEKDAYS,
@@ -22,7 +24,7 @@ from .const import (
     DOMAIN,
 )
 from .evaluator import active_interval, next_transition
-from .models import Schedule, ScheduleGroup
+from .models import Schedule, ScheduleGroup, steps_to_storage
 
 
 class SimpleScheduleEntity(RestoreEntity, Entity):
@@ -52,23 +54,28 @@ class SimpleScheduleEntity(RestoreEntity, Entity):
     def icon(self) -> str:
         if not self.schedule.enabled:
             return "mdi:calendar-remove"
+        if not self.schedule.in_season(dt_util.now().date()):
+            return "mdi:calendar-end"
         return "mdi:calendar-clock" if self._attr_is_on else "mdi:calendar-blank"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        today = dt_util.now().date()
+        in_season = self.schedule.in_season(today)
         return {
             "schedule_id": self.schedule.id,
             "friendly_name": self.schedule.name,
             ATTR_ENABLED: self.schedule.enabled,
             ATTR_WEEKDAYS: list(self.schedule.weekdays),
             ATTR_WINDOWS: [w.to_dict() for w in self.schedule.windows],
-            ATTR_DEFAULT_ON_START: self.schedule.default_on_start,
-            ATTR_DEFAULT_ON_END: self.schedule.default_on_end,
+            ATTR_DEFAULT_ON_START: steps_to_storage(self.schedule.default_on_start),
+            ATTR_DEFAULT_ON_END: steps_to_storage(self.schedule.default_on_end),
             ATTR_GROUP_ID: self.schedule.group_id,
             ATTR_DATE_RANGE: (
                 self.schedule.date_range.to_dict() if self.schedule.date_range else None
             ),
             ATTR_SEASON_AVAILABLE: self.schedule.season_available,
+            ATTR_IN_SEASON: in_season,
             ATTR_ACTIVE_WINDOW: self._active_window,
             ATTR_NEXT_EVENT: self._next_event,
         }
@@ -129,6 +136,7 @@ class SimpleScheduleGroupEntity(Entity):
     def extra_state_attributes(self) -> dict[str, Any]:
         members = []
         active_member = None
+        today = dt_util.now().date()
         for mid in self.group.member_ids:
             sched = self.store.get_schedule(mid)
             if not sched:
@@ -140,6 +148,7 @@ class SimpleScheduleGroupEntity(Entity):
                     "name": sched.name,
                     "enabled": sched.enabled,
                     "season_available": sched.season_available,
+                    "in_season": sched.in_season(today),
                     "date_range": (
                         sched.date_range.to_dict() if sched.date_range else None
                     ),

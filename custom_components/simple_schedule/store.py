@@ -16,12 +16,17 @@ class SimpleScheduleStore:
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
-        self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        self._store: Store[dict[str, Any]] = Store(
+            hass,
+            STORAGE_VERSION,
+            STORAGE_KEY,
+        )
         self.schedules: dict[str, Schedule] = {}
         self.groups: dict[str, ScheduleGroup] = {}
 
     async def async_load(self) -> None:
         data = await self._store.async_load() or {}
+        # from_dict normalizes v1 singular actions → step lists
         self.schedules = {
             item["id"]: Schedule.from_dict(item)
             for item in data.get("schedules", [])

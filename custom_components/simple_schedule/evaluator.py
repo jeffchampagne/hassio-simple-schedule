@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from .const import WEEKDAYS
-from .models import Schedule, TimeBound, Window, parse_hm
+from .models import ActionStep, Schedule, TimeBound, Window, parse_hm
 
 SUN_ATTR = {
     "dawn": "next_dawn",
@@ -146,12 +146,18 @@ def resolve_window_for_start_day(
 def iter_intervals(
     hass: HomeAssistant, schedule: Schedule, around: datetime, days: int = 2
 ) -> list[ResolvedInterval]:
-    """Build resolved intervals for start days near `around`."""
+    """Build resolved intervals for start days near `around`.
+
+    When ``date_range`` is set, intervals whose **start day** falls outside
+    the range are omitted (same overnight start-day rule as DOW).
+    """
     local = dt_util.as_local(around)
     base = local.date()
     out: list[ResolvedInterval] = []
     for offset in range(-1, days + 1):
         start_day = base + timedelta(days=offset)
+        if not schedule.in_season(start_day):
+            continue
         dow = weekday_id(start_day)
         if dow not in schedule.weekdays:
             continue
@@ -163,16 +169,26 @@ def iter_intervals(
     return out
 
 
+def active_intervals(
+    hass: HomeAssistant, schedule: Schedule, when: datetime | None = None
+) -> list[ResolvedInterval]:
+    """All currently active intervals (supports overlapping windows)."""
+    if not schedule.enabled:
+        return []
+    when = when or dt_util.now()
+    local = dt_util.as_local(when)
+    # Solo / dated schedules: if today is out of season and we're not still
+    # inside an overnight window that *started* in-season, nothing is active.
+    # Overnight coverage is handled by including yesterday's start_day in
+    # iter_intervals (-1 offset) when that start day was in season.
+    return [i for i in iter_intervals(hass, schedule, local, days=2) if i.contains(local)]
+
+
 def active_interval(
     hass: HomeAssistant, schedule: Schedule, when: datetime | None = None
 ) -> ResolvedInterval | None:
-    if not schedule.enabled:
-        return None
-    when = when or dt_util.now()
-    for interval in iter_intervals(hass, schedule, when, days=2):
-        if interval.contains(when):
-            return interval
-    return None
+    intervals = active_intervals(hass, schedule, when)
+    return intervals[0] if intervals else None
 
 
 def next_transition(
@@ -194,7 +210,20 @@ def next_transition(
     return candidates[0]
 
 
-def window_action(schedule: Schedule, window: Window, which: str) -> str | None:
+def window_actions(
+    schedule: Schedule, window: Window, which: str
+) -> list[ActionStep]:
+    """Ordered steps for start or end (window list, else schedule defaults)."""
     if which == "start":
-        return window.on_start or schedule.default_on_start
-    return window.on_end or schedule.default_on_end
+        steps = window.on_start if window.on_start else schedule.default_on_start
+    else:
+        steps = window.on_end if window.on_end else schedule.default_on_end
+    return list(steps or [])
+
+
+def window_action(schedule: Schedule, window: Window, which: str) -> str | None:
+    """First action entity id (compat helper)."""
+    for step in window_actions(schedule, window, which):
+        if step.type == "action" and step.entity_id:
+            return step.entity_id
+    return None

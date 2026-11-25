@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -30,9 +31,12 @@ from .const import (
     WEEKDAYS,
 )
 from .entity import SimpleScheduleEntity, SimpleScheduleGroupEntity
-from .evaluator import active_interval, next_transition, window_action, weekday_id
+from .evaluator import active_intervals, next_transition, window_actions, weekday_id
 from .models import Schedule, ScheduleGroup, Window, new_group, new_schedule
 from .store import SimpleScheduleStore
+
+# Service field: legacy string, list of strings, or step dicts
+ACTION_STEPS_SCHEMA = vol.Any(None, cv.entity_id, [cv.entity_id], dict, [dict])
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -126,7 +130,8 @@ class SimpleScheduleRuntime:
         self.group_entities: dict[str, SimpleScheduleGroupEntity] = {}
         self._unsub_interval = None
         self._unsub_point = None
-        self._prev_active: dict[str, str | None] = {}  # schedule_id -> window_id
+        # schedule_id -> set of active window ids (supports overlapping windows)
+        self._prev_active: dict[str, set[str]] = {}
 
     async def async_setup(self) -> None:
         await self.async_reload_entities()
@@ -253,14 +258,13 @@ class SimpleScheduleRuntime:
         if not entity:
             return
         entity.apply_schedule(schedule)
-        interval = active_interval(self.hass, schedule)
-        prev_window = self._prev_active.get(schedule.id)
-        cur_window = interval.window_id if interval else None
+        intervals = active_intervals(self.hass, schedule)
+        cur_windows = {i.window_id for i in intervals}
+        prev_windows = self._prev_active.get(schedule.id, set())
 
-        if prev_window != cur_window:
-            # End previous
-            if prev_window:
-                window = next((w for w in schedule.windows if w.id == prev_window), None)
+        if prev_windows != cur_windows:
+            for wid in prev_windows - cur_windows:
+                window = next((w for w in schedule.windows if w.id == wid), None)
                 if window and schedule.enabled:
                     await self._fire_action(schedule, window, "end")
                     self.hass.bus.async_fire(
@@ -268,12 +272,11 @@ class SimpleScheduleRuntime:
                         {
                             "entity_id": entity.entity_id,
                             "schedule_id": schedule.id,
-                            "window_id": prev_window,
+                            "window_id": wid,
                         },
                     )
-            # Start new
-            if cur_window and interval:
-                window = next((w for w in schedule.windows if w.id == cur_window), None)
+            for wid in cur_windows - prev_windows:
+                window = next((w for w in schedule.windows if w.id == wid), None)
                 if window and schedule.enabled:
                     await self._fire_action(schedule, window, "start")
                     self.hass.bus.async_fire(
@@ -281,29 +284,37 @@ class SimpleScheduleRuntime:
                         {
                             "entity_id": entity.entity_id,
                             "schedule_id": schedule.id,
-                            "window_id": cur_window,
+                            "window_id": wid,
                         },
                     )
-            self._prev_active[schedule.id] = cur_window
+            self._prev_active[schedule.id] = cur_windows
 
         entity.reevaluate()
 
     async def _fire_action(
         self, schedule: Schedule, window: Window, which: str
     ) -> None:
-        entity_id = window_action(schedule, window, which)
-        if not entity_id:
-            return
-        domain, _, _ = entity_id.partition(".")
-        if domain not in ACTION_DOMAINS:
-            _LOGGER.warning("Ignoring invalid action %s", entity_id)
-            return
-        try:
-            await self.hass.services.async_call(
-                domain, "turn_on", {"entity_id": entity_id}, blocking=False
-            )
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("Failed to fire %s action %s", which, entity_id)
+        """Run ordered steps (actions + duration waits) for start/end."""
+        steps = window_actions(schedule, window, which)
+        for step in steps:
+            if step.type == "wait":
+                secs = int(step.seconds or 0)
+                if secs > 0:
+                    await asyncio.sleep(secs)
+                continue
+            entity_id = step.entity_id
+            if not entity_id:
+                continue
+            domain, _, _ = entity_id.partition(".")
+            if domain not in ACTION_DOMAINS:
+                _LOGGER.warning("Ignoring invalid action %s", entity_id)
+                continue
+            try:
+                await self.hass.services.async_call(
+                    domain, "turn_on", {"entity_id": entity_id}, blocking=True
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Failed to fire %s action %s", which, entity_id)
 
     async def async_apply_season_auto_select(self) -> None:
         today = dt_util.now().date()
@@ -483,8 +494,8 @@ class SimpleScheduleRuntime:
                         cv.ensure_list, [vol.In(WEEKDAYS)]
                     ),
                     vol.Optional("windows", default=[]): vol.All(cv.ensure_list, [dict]),
-                    vol.Optional("default_on_start"): vol.Any(None, cv.entity_id),
-                    vol.Optional("default_on_end"): vol.Any(None, cv.entity_id),
+                    vol.Optional("default_on_start"): ACTION_STEPS_SCHEMA,
+                    vol.Optional("default_on_end"): ACTION_STEPS_SCHEMA,
                     vol.Optional("group_id"): vol.Any(None, cv.string),
                     vol.Optional("date_range"): vol.Any(None, dict),
                     vol.Optional("season_available", default=True): cv.boolean,
@@ -500,8 +511,8 @@ class SimpleScheduleRuntime:
                         cv.ensure_list, [vol.In(WEEKDAYS)]
                     ),
                     vol.Optional("windows"): vol.All(cv.ensure_list, [dict]),
-                    vol.Optional("default_on_start"): vol.Any(None, cv.entity_id),
-                    vol.Optional("default_on_end"): vol.Any(None, cv.entity_id),
+                    vol.Optional("default_on_start"): ACTION_STEPS_SCHEMA,
+                    vol.Optional("default_on_end"): ACTION_STEPS_SCHEMA,
                     vol.Optional("group_id"): vol.Any(None, cv.string),
                     vol.Optional("date_range"): vol.Any(None, dict),
                     vol.Optional("season_available"): cv.boolean,

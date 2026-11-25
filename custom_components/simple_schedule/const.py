@@ -6,7 +6,8 @@ DOMAIN = "simple_schedule"
 PLATFORMS: list[str] = []
 
 STORAGE_KEY = f"{DOMAIN}.storage"
-STORAGE_VERSION = 1
+# v2: on_start / on_end / defaults are ordered action-step lists (actions + waits).
+STORAGE_VERSION = 2
 
 ATTR_ENABLED = "enabled"
 ATTR_WEEKDAYS = "weekdays"
@@ -16,6 +17,7 @@ ATTR_ACTIVE_WINDOW = "active_window"
 ATTR_GROUP_ID = "group_id"
 ATTR_DATE_RANGE = "date_range"
 ATTR_SEASON_AVAILABLE = "season_available"
+ATTR_IN_SEASON = "in_season"
 ATTR_DEFAULT_ON_START = "default_on_start"
 ATTR_DEFAULT_ON_END = "default_on_end"
 ATTR_STICKY = "sticky"
@@ -34,5 +36,6 @@ WEEKDAYS = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
 SUN_KINDS = ("dawn", "sunrise", "dusk", "sunset")
 BOUND_KINDS = ("clock",) + SUN_KINDS
 ACTION_DOMAINS = ("scene", "script")
+STEP_TYPES = ("action", "wait")
 
 CARD_URL_PATH = f"/{DOMAIN}/simple-schedule-card.js"

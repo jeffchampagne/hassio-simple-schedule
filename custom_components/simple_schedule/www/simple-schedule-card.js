@@ -1720,12 +1720,20 @@
       `;
     }
 
+    static getConfigElement() {
+      return document.createElement("simple-schedule-card-editor");
+    }
+
     static getStubConfig(hass) {
       const entity =
         Object.keys(hass.states).find((e) =>
           e.startsWith("simple_schedule.group_")
         ) || "simple_schedule.group_sample_outdoor_lighting";
-      return { type: "custom:simple-schedule-group-card", entity };
+      return {
+        type: "custom:simple-schedule-group-card",
+        entity,
+        time_format: "12",
+      };
     }
   }
 
@@ -1733,36 +1741,114 @@
     static get properties() {
       return { hass: {}, _config: {} };
     }
-    setConfig(config) {
-      this._config = config;
+
+    static get styles() {
+      return css`
+        .wrap {
+          padding: 8px 0;
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+        }
+        .label {
+          font-weight: 600;
+          margin-bottom: 6px;
+        }
+        .hint {
+          color: var(--secondary-text-color);
+          font-size: 0.85rem;
+          margin-top: 4px;
+        }
+        .tf-row {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .tf-row button {
+          padding: 8px 14px;
+          border-radius: 8px;
+          border: 1px solid var(--divider-color);
+          background: var(--card-background-color);
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font-weight: 600;
+        }
+        .tf-row button.on {
+          background: var(--primary-color);
+          color: var(--text-primary-color, #fff);
+          border-color: var(--primary-color);
+        }
+        ha-entity-picker {
+          display: block;
+          width: 100%;
+        }
+      `;
     }
+
+    setConfig(config) {
+      this._config = config || {};
+    }
+
+    get _fmt() {
+      return String(this._config?.time_format || "12") === "24" ? "24" : "12";
+    }
+
+    get _isGroupCard() {
+      const t = this._config?.type || "";
+      return t.includes("simple-schedule-group-card");
+    }
+
     render() {
+      if (!this._config) return html``;
+      const fmt = this._fmt;
       return html`
-        <div style="padding:8px">
-          <div>Entity</div>
-          <input
-            type="text"
-            style="width:100%"
-            .value=${this._config?.entity || ""}
-            @change=${(e) => this._update({ entity: e.target.value })}
-          />
-          <div style="margin-top:8px">time_format (12|24)</div>
-          <input
-            type="text"
-            .value=${this._config?.time_format || "12"}
-            @change=${(e) => this._update({ time_format: e.target.value })}
-          />
-          <div style="margin-top:8px">schedule_id (optional override)</div>
-          <input
-            type="text"
-            style="width:100%"
-            .value=${this._config?.schedule_id || ""}
-            @change=${(e) => this._update({ schedule_id: e.target.value })}
-          />
+        <div class="wrap">
+          <div>
+            <div class="label">Entity</div>
+            <ha-entity-picker
+              .hass=${this.hass}
+              .value=${this._config.entity || ""}
+              .includeDomains=${["simple_schedule"]}
+              .label=${"Entity"}
+              allow-custom-entity
+              @value-changed=${this._entityChanged}
+            ></ha-entity-picker>
+            <div class="hint">
+              ${this._isGroupCard
+                ? "Pick a simple_schedule group entity."
+                : "Pick a simple_schedule entity."}
+            </div>
+          </div>
+          <div>
+            <div class="label">Time format</div>
+            <div class="tf-row">
+              <button
+                type="button"
+                class="${fmt === "12" ? "on" : ""}"
+                @click=${() => this._update({ time_format: "12" })}
+              >
+                12-hour
+              </button>
+              <button
+                type="button"
+                class="${fmt === "24" ? "on" : ""}"
+                @click=${() => this._update({ time_format: "24" })}
+              >
+                24-hour
+              </button>
+            </div>
+          </div>
         </div>
       `;
     }
+
+    _entityChanged(ev) {
+      const value = ev.detail?.value ?? "";
+      this._update({ entity: value || undefined });
+    }
+
     _update(patch) {
+      // Preserve YAML-only keys (e.g. schedule_id) — not shown in UI
       this._config = { ...this._config, ...patch };
       this.dispatchEvent(
         new CustomEvent("config-changed", {
@@ -1774,9 +1860,6 @@
     }
   }
 
-  // Expose schedule_id on state attributes by monkey-patching is hard;
-  // instead enrich via card config. Also fix: entity uses friendly name from HA.
-
   customElements.define("simple-schedule-card", SimpleScheduleCard);
   customElements.define("simple-schedule-group-card", SimpleScheduleGroupCard);
   customElements.define("simple-schedule-card-editor", SimpleScheduleCardEditor);
@@ -1785,11 +1868,15 @@
   window.customCards.push({
     type: "simple-schedule-card",
     name: "Simple Schedule Card",
-    description: "Weekly availability windows with optional scene/script hooks",
+    description:
+      "Create a set of schedules that can operate independently.",
+    preview: false,
   });
   window.customCards.push({
     type: "simple-schedule-group-card",
     name: "Simple Schedule Group Card",
-    description: "Exclusive schedule group with seasons + sticky select",
+    description:
+      "Create a group of schedules where only one schedule is active at any given time. Example: A Normal, Halloween, and Christmas lighting schedule",
+    preview: false,
   });
 })();

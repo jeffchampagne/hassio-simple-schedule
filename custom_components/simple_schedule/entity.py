@@ -169,6 +169,7 @@ class SimpleScheduleGroupEntity(Entity):
             "enabled_member": self.group.enabled_member_id,
             "active_member": active_member,
             "sticky": self.group.sticky,
+            "require_fallback": self.group.require_fallback,
         }
 
     @callback

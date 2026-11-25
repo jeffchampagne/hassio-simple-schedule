@@ -1386,7 +1386,9 @@
         hass: {},
         _config: {},
         _expandedId: { type: String },
+        _groupEdit: { type: Boolean },
         _hint: { type: String },
+        _error: { type: String },
       };
     }
 
@@ -1398,6 +1400,8 @@
       if (!config?.entity) throw new Error("entity is required");
       this._config = config;
       this._expandedId = null;
+      this._groupEdit = false;
+      this._error = null;
       this._hint = "Click: select → sticky → clear sticky";
     }
 
@@ -1428,6 +1432,50 @@
       });
     }
 
+    async _patchGroup(patch) {
+      this._error = null;
+      const a = this._state?.attributes || {};
+      const requireFallback =
+        patch.require_fallback !== undefined
+          ? Boolean(patch.require_fallback)
+          : a.require_fallback !== false;
+      const fallback =
+        patch.fallback_member_id !== undefined
+          ? patch.fallback_member_id
+          : a.fallback_member;
+      if (requireFallback && !fallback) {
+        this._error =
+          "Pick a default schedule, or turn on “Don’t require a default schedule”.";
+        return;
+      }
+      await this.hass.callService("simple_schedule", "update_group", {
+        group_id: this._groupId,
+        ...patch,
+      });
+    }
+
+    async _setDontRequireDefault(on) {
+      if (on) {
+        await this._patchGroup({
+          require_fallback: false,
+          fallback_member_id: null,
+        });
+      } else {
+        const a = this._state?.attributes || {};
+        const members = a.members || [];
+        const keep = a.fallback_member || members.find((m) => !m.date_range)?.id || members[0]?.id || null;
+        if (!keep) {
+          this._error =
+            "Add a member before requiring a default schedule.";
+          return;
+        }
+        await this._patchGroup({
+          require_fallback: true,
+          fallback_member_id: keep,
+        });
+      }
+    }
+
     render() {
       const st = this._state;
       if (!st) {
@@ -1439,6 +1487,9 @@
       const members = a.members || [];
       const sticky = Boolean(a.sticky);
       const enabledMember = a.enabled_member;
+      const requireFallback = a.require_fallback !== false;
+      const dontRequire = !requireFallback;
+      const fallbackId = a.fallback_member;
 
       return html`
         <ha-card>
@@ -1448,17 +1499,32 @@
           </div>
           <div class="body">
             <div class="muted">
-              ${this._hint}${sticky ? " · Sticky on" : " · Not sticky"}
+              ${this._hint}${sticky ? " · Sticky on" : " · Not sticky"}${dontRequire
+                ? " · No default required"
+                : fallbackId
+                  ? ""
+                  : " · Default missing"}
             </div>
+            ${!enabledMember
+              ? html`<div
+                  class="muted"
+                  style="margin-top:8px;padding:10px 12px;width:100%;box-sizing:border-box;border-left:4px solid var(--disabled-color, #9e9e9e);background:var(--secondary-background-color)"
+                >
+                  No schedule enabled (out of season or no default).
+                </div>`
+              : ""}
             ${members.map((m) => {
               const selected = m.id === enabledMember;
               const isSticky = selected && sticky;
               const expanded = this._expandedId === m.id;
+              const isFallback = m.id === fallbackId;
               const season = m.date_range
                 ? `${m.date_range.start || "—"} – ${m.date_range.end || "—"}${
                     m.date_range.recurs_yearly ? " · yearly" : ""
                   }`
-                : "Fallback (no dates)";
+                : isFallback
+                  ? "Default (no dates)"
+                  : "Year-round (no dates)";
               return html`
                 <div
                   style="margin-top:8px;border:1px solid var(--divider-color);border-radius:8px;overflow:hidden"
@@ -1473,6 +1539,9 @@
                         <span class="title" style="font-size:1rem">${m.name}</span>
                         ${isSticky
                           ? html`<span class="chip active">Sticky</span>`
+                          : ""}
+                        ${isFallback && requireFallback
+                          ? html`<span class="chip">Default</span>`
                           : ""}
                       </div>
                       <div class="muted" style="color:inherit;opacity:0.9">
@@ -1552,6 +1621,67 @@
                 </div>
               `;
             })}
+
+            <div style="margin-top:12px">
+              <mwc-button
+                @click=${() => (this._groupEdit = !this._groupEdit)}
+                >${this._groupEdit ? "▴ Collapse" : "▾ Edit"}</mwc-button
+              >
+            </div>
+            ${this._groupEdit
+              ? html`<div style="margin-top:10px">
+                  ${requireFallback
+                    ? html`
+                        <div class="muted" style="font-weight:600">
+                          Default schedule
+                        </div>
+                        <div class="muted">
+                          Used when no seasonal member matches today’s date.
+                        </div>
+                        <div class="row" style="margin-top:6px;flex-wrap:wrap">
+                          ${members.map(
+                            (m) => html`<button
+                              class="linkish ${fallbackId === m.id ? "on" : ""}"
+                              style="margin:2px;padding:4px 8px;border-radius:6px;border:1px solid var(--divider-color);background:${fallbackId ===
+                              m.id
+                                ? "var(--primary-color)"
+                                : "var(--card-background-color)"};color:${fallbackId ===
+                              m.id
+                                ? "var(--text-primary-color, #fff)"
+                                : "var(--primary-text-color)"};cursor:pointer"
+                              @click=${() =>
+                                this._patchGroup({
+                                  require_fallback: true,
+                                  fallback_member_id: m.id,
+                                })}
+                            >
+                              ${m.name}
+                            </button>`
+                          )}
+                        </div>
+                      `
+                    : html`<div class="muted">
+                        No default schedule — out of season may leave none
+                        enabled.
+                      </div>`}
+                  <div
+                    class="row"
+                    style="margin-top:14px;padding-top:10px;border-top:1px solid var(--divider-color)"
+                  >
+                    <span style="flex:1;min-width:0"
+                      >Don’t require a default schedule</span
+                    >
+                    <ha-switch
+                      .checked=${dontRequire}
+                      @change=${(e) =>
+                        this._setDontRequireDefault(e.target.checked)}
+                    ></ha-switch>
+                  </div>
+                  ${this._error
+                    ? html`<div class="error">${this._error}</div>`
+                    : ""}
+                </div>`
+              : ""}
           </div>
         </ha-card>
       `;

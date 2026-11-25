@@ -341,6 +341,8 @@ class ScheduleGroup:
     fallback_member_id: str | None = None
     enabled_member_id: str | None = None
     sticky: bool = False
+    # HSCP-42: when False, fallback may be null; auto-select may leave none enabled
+    require_fallback: bool = True
     object_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -352,19 +354,25 @@ class ScheduleGroup:
             "fallback_member_id": self.fallback_member_id,
             "enabled_member_id": self.enabled_member_id,
             "sticky": self.sticky,
+            "require_fallback": self.require_fallback,
             "object_id": self.object_id,
         }
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> ScheduleGroup:
+        # Default True preserves pre-HSCP-42 behavior when field absent
+        require_fallback = data.get("require_fallback")
+        if require_fallback is None:
+            require_fallback = True
         return ScheduleGroup(
             id=data.get("id") or _new_id("g"),
             name=data.get("name") or "Schedule group",
             exclusive=bool(data.get("exclusive", True)),
             member_ids=list(data.get("member_ids") or data.get("members") or []),
-            fallback_member_id=data.get("fallback_member_id"),
-            enabled_member_id=data.get("enabled_member_id"),
+            fallback_member_id=data.get("fallback_member_id") or None,
+            enabled_member_id=data.get("enabled_member_id") or None,
             sticky=bool(data.get("sticky", False)),
+            require_fallback=bool(require_fallback),
             object_id=data.get("object_id"),
         )
 

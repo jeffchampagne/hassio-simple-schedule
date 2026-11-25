@@ -92,6 +92,10 @@ create_group:
     enabled_member_id:
       selector:
         text:
+    require_fallback:
+      default: true
+      selector:
+        boolean:
 
 update_group:
   name: Update group
@@ -107,6 +111,12 @@ update_group:
       selector:
         object:
     sticky:
+      selector:
+        boolean:
+    fallback_member_id:
+      selector:
+        text:
+    require_fallback:
       selector:
         boolean:
 

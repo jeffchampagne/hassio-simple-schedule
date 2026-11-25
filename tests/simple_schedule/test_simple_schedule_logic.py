@@ -379,6 +379,73 @@ class FireActionWaitTests(unittest.TestCase):
         )
 
 
+class GroupFallbackTests(unittest.TestCase):
+    """HSCP-42: groups may omit default/fallback member."""
+
+    def test_require_fallback_defaults_true(self):
+        g = M.ScheduleGroup.from_dict({"id": "g1", "name": "Outdoor"})
+        self.assertTrue(g.require_fallback)
+        self.assertIsNone(g.fallback_member_id)
+
+    def test_allow_null_fallback_when_not_required(self):
+        g = M.ScheduleGroup.from_dict(
+            {
+                "id": "g1",
+                "name": "Seasonal only",
+                "require_fallback": False,
+                "fallback_member_id": None,
+                "member_ids": ["s_pride"],
+            }
+        )
+        self.assertFalse(g.require_fallback)
+        self.assertIsNone(g.fallback_member_id)
+        stored = g.to_dict()
+        self.assertFalse(stored["require_fallback"])
+        self.assertIsNone(stored["fallback_member_id"])
+
+    def test_auto_select_target_none_without_fallback(self):
+        """Mirror async_apply_season_auto_select target resolution."""
+        seasonal = M.Schedule.from_dict(
+            {
+                "id": "s_pride",
+                "name": "Pride",
+                "season_available": True,
+                "date_range": {"start": "06-01", "end": "06-30", "recurs_yearly": True},
+                "weekdays": ["sun", "mon", "tue", "wed", "thu", "fri", "sat"],
+                "windows": [clock_window("w", "20:00", "20:15")],
+            }
+        )
+        group = M.ScheduleGroup.from_dict(
+            {
+                "id": "g1",
+                "name": "Outdoor",
+                "member_ids": [seasonal.id],
+                "require_fallback": False,
+                "fallback_member_id": None,
+                "enabled_member_id": seasonal.id,
+            }
+        )
+        schedules = {seasonal.id: seasonal}
+
+        def resolve_target(today: date) -> str | None:
+            if group.sticky:
+                return group.enabled_member_id
+            match_id = None
+            for mid in group.member_ids:
+                sched = schedules.get(mid)
+                if not sched or not sched.season_available or not sched.date_range:
+                    continue
+                if sched.date_range.contains(today):
+                    if match_id is not None:
+                        return None
+                    match_id = mid
+            return match_id or group.fallback_member_id
+
+        self.assertEqual(resolve_target(date(2026, 6, 15)), "s_pride")
+        # Out of season, no fallback → none (may leave none enabled)
+        self.assertIsNone(resolve_target(date(2026, 11, 15)))
+
+
 def main():
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)

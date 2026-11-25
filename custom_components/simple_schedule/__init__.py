@@ -335,9 +335,12 @@ class SimpleScheduleRuntime:
             target = match_id or group.fallback_member_id
             if target:
                 await self._exclusive_enable(group.id, target, sticky=False)
+            elif not group.require_fallback:
+                # HSCP-42: no in-season member and no fallback → leave none enabled
+                await self._exclusive_enable(group.id, None, sticky=False)
 
     async def _exclusive_enable(
-        self, group_id: str, member_id: str, *, sticky: bool
+        self, group_id: str, member_id: str | None, *, sticky: bool
     ) -> None:
         group = self.store.get_group(group_id)
         if not group:
@@ -348,7 +351,7 @@ class SimpleScheduleRuntime:
             sched = self.store.get_schedule(mid)
             if not sched:
                 continue
-            sched.enabled = mid == member_id
+            sched.enabled = member_id is not None and mid == member_id
             await self.store.upsert_schedule(sched)
         await self.store.upsert_group(group)
         await self.async_reload_entities()
@@ -455,9 +458,23 @@ class SimpleScheduleRuntime:
                     continue
                 data[key] = value
             data["id"] = existing.id
+            # Empty string → clear fallback / enabled (HSCP-42 optional default)
+            if data.get("fallback_member_id") == "":
+                data["fallback_member_id"] = None
+            if data.get("enabled_member_id") == "":
+                data["enabled_member_id"] = None
             group = ScheduleGroup.from_dict(data)
+            # Card validates require_fallback; companion allows null fallback (no hard error).
             await self.store.upsert_group(group)
-            await self.async_reload_entities()
+            if (
+                not group.require_fallback
+                and not group.fallback_member_id
+                and not group.sticky
+            ):
+                # Re-run season logic so clearing fallback can leave none enabled
+                await self.async_apply_season_auto_select()
+            else:
+                await self.async_reload_entities()
 
         async def delete_group(call: ServiceCall) -> None:
             group = self.store.get_group(call.data["group_id"])
@@ -536,6 +553,7 @@ class SimpleScheduleRuntime:
                     ),
                     vol.Optional("fallback_member_id"): vol.Any(None, cv.string),
                     vol.Optional("enabled_member_id"): vol.Any(None, cv.string),
+                    vol.Optional("require_fallback", default=True): cv.boolean,
                 }
             ),
             SERVICE_UPDATE_GROUP: vol.Schema(
@@ -546,6 +564,7 @@ class SimpleScheduleRuntime:
                     vol.Optional("fallback_member_id"): vol.Any(None, cv.string),
                     vol.Optional("enabled_member_id"): vol.Any(None, cv.string),
                     vol.Optional("sticky"): cv.boolean,
+                    vol.Optional("require_fallback"): cv.boolean,
                 }
             ),
             SERVICE_DELETE_GROUP: vol.Schema({vol.Required("group_id"): cv.string}),

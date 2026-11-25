@@ -511,14 +511,14 @@
           margin: 8px 0;
           background: var(--secondary-background-color);
         }
+        /* Overlap: same wide left rail as .header.on/.off, amber — no full outline */
         .window-card.overlap {
-          border-color: color-mix(
+          border-left: 4px solid var(--ss-overlap);
+          background: color-mix(
             in srgb,
-            var(--ss-overlap) 70%,
-            var(--divider-color)
+            var(--ss-overlap) 12%,
+            var(--secondary-background-color)
           );
-          box-shadow: inset 0 0 0 1px
-            color-mix(in srgb, var(--ss-overlap) 28%, transparent);
         }
         .step-list {
           display: flex;

@@ -1445,7 +1445,7 @@
           : a.fallback_member;
       if (requireFallback && !fallback) {
         this._error =
-          "Pick a default schedule, or turn on “Don’t require a default schedule”.";
+          "Pick a default schedule, or turn on “Don’t require a default schedule window”.";
         return;
       }
       await this.hass.callService("simple_schedule", "update_group", {
@@ -1484,12 +1484,16 @@
         >`;
       }
       const a = st.attributes || {};
-      const members = a.members || [];
+      // Never filter out disabled / out-of-season members — windows must still list
+      const members = Array.isArray(a.members) ? a.members : [];
       const sticky = Boolean(a.sticky);
-      const enabledMember = a.enabled_member;
+      const rawEnabled = a.enabled_member;
+      const enabledMember =
+        rawEnabled && rawEnabled !== "none" ? rawEnabled : null;
       const requireFallback = a.require_fallback !== false;
       const dontRequire = !requireFallback;
       const fallbackId = a.fallback_member;
+      const fmt = String(this._config?.time_format || "12") === "24" ? "24" : "12";
 
       return html`
         <ha-card>
@@ -1505,12 +1509,13 @@
                   ? ""
                   : " · Default missing"}
             </div>
-            ${!enabledMember
+            ${dontRequire && !enabledMember
               ? html`<div
                   class="muted"
                   style="margin-top:8px;padding:10px 12px;width:100%;box-sizing:border-box;border-left:4px solid var(--disabled-color, #9e9e9e);background:var(--secondary-background-color)"
                 >
-                  No schedule enabled (out of season or no default).
+                  No schedule window is active. A default schedule is not
+                  required for this group.
                 </div>`
               : ""}
             ${members.map((m) => {
@@ -1518,6 +1523,18 @@
               const isSticky = selected && sticky;
               const expanded = this._expandedId === m.id;
               const isFallback = m.id === fallbackId;
+              const memberState = this.hass?.states?.[m.entity_id];
+              const windows =
+                (Array.isArray(m.windows) && m.windows.length
+                  ? m.windows
+                  : null) ||
+                memberState?.attributes?.windows ||
+                [];
+              const windowsSummary =
+                m.windows_summary ||
+                (windows.length
+                  ? windows.map((w) => windowLabel(w, fmt)).join(", ")
+                  : "No windows set");
               const season = m.date_range
                 ? `${m.date_range.start || "—"} – ${m.date_range.end || "—"}${
                     m.date_range.recurs_yearly ? " · yearly" : ""
@@ -1545,7 +1562,7 @@
                           : ""}
                       </div>
                       <div class="muted" style="color:inherit;opacity:0.9">
-                        ${season} · ${m.windows_summary || "No windows set"}
+                        ${season} · ${windowsSummary}
                       </div>
                     </div>
                     <mwc-button
@@ -1555,6 +1572,25 @@
                       }}
                       >${expanded ? "▴ Season" : "▾ Season"}</mwc-button
                     >
+                  </div>
+                  <div
+                    class="body"
+                    style="padding-top:8px;padding-bottom:${expanded
+                      ? "0"
+                      : "12px"}"
+                  >
+                    <div class="muted" style="font-weight:600">Windows</div>
+                    ${windows.length
+                      ? windows.map(
+                          (w) => html`<div class="muted" style="margin-top:4px">
+                            ${windowLabel(w, fmt)}${isOvernight(w)
+                              ? " · overnight"
+                              : ""}
+                          </div>`
+                        )
+                      : html`<div class="muted" style="margin-top:4px">
+                          No windows set
+                        </div>`}
                   </div>
                   ${expanded
                     ? html`<div class="body">
@@ -1660,16 +1696,13 @@
                           )}
                         </div>
                       `
-                    : html`<div class="muted">
-                        No default schedule — out of season may leave none
-                        enabled.
-                      </div>`}
+                    : ""}
                   <div
                     class="row"
                     style="margin-top:14px;padding-top:10px;border-top:1px solid var(--divider-color)"
                   >
                     <span style="flex:1;min-width:0"
-                      >Don’t require a default schedule</span
+                      >Don't require a default schedule window</span
                     >
                     <ha-switch
                       .checked=${dontRequire}

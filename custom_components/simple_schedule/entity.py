@@ -141,6 +141,8 @@ class SimpleScheduleGroupEntity(Entity):
             sched = self.store.get_schedule(mid)
             if not sched:
                 continue
+            # Always include every member (even when enabled=false / out of season)
+            # so group cards can still list windows under each schedule.
             members.append(
                 {
                     "id": sched.id,
@@ -152,6 +154,7 @@ class SimpleScheduleGroupEntity(Entity):
                     "date_range": (
                         sched.date_range.to_dict() if sched.date_range else None
                     ),
+                    "windows": [w.to_dict() for w in sched.windows],
                     "windows_summary": ", ".join(w.summary_label() for w in sched.windows)
                     or "No windows set",
                 }

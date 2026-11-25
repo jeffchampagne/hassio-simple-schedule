@@ -310,6 +310,8 @@
       return css`
         :host {
           display: block;
+          /* Overlap accent — amber/gold; not error/enabled/active */
+          --ss-overlap: #c9a227;
         }
         ha-card {
           overflow: hidden;
@@ -394,26 +396,22 @@
           font-weight: 650;
         }
         .chip.overlap {
-          background: color-mix(
-            in srgb,
-            var(--warning-color, #ef6c00) 18%,
-            transparent
-          );
-          border: 1px solid var(--warning-color, #ef6c00);
+          background: color-mix(in srgb, var(--ss-overlap) 22%, transparent);
+          border: 1px solid var(--ss-overlap);
           color: var(--primary-text-color);
           font-weight: 650;
         }
-        .warn-banner {
+        .warn-banner.overlap {
           display: block;
           width: 100%;
           box-sizing: border-box;
           margin: 8px 0 0;
           padding: 10px 12px;
           border-radius: 0;
-          border-left: 4px solid var(--warning-color, #ef6c00);
+          border-left: 4px solid var(--ss-overlap);
           background: color-mix(
             in srgb,
-            var(--warning-color, #ef6c00) 14%,
+            var(--ss-overlap) 14%,
             var(--card-background-color)
           );
           color: var(--primary-text-color);
@@ -516,11 +514,11 @@
         .window-card.overlap {
           border-color: color-mix(
             in srgb,
-            var(--warning-color, #ef6c00) 55%,
+            var(--ss-overlap) 70%,
             var(--divider-color)
           );
           box-shadow: inset 0 0 0 1px
-            color-mix(in srgb, var(--warning-color, #ef6c00) 25%, transparent);
+            color-mix(in srgb, var(--ss-overlap) 28%, transparent);
         }
         .step-list {
           display: flex;
@@ -1011,7 +1009,7 @@
                 : ""}
             </div>
             ${overlapWarn
-              ? html`<div class="warn-banner">${overlapWarn}</div>`
+              ? html`<div class="warn-banner overlap">${overlapWarn}</div>`
               : ""}
 
             ${this._expanded

@@ -104,13 +104,19 @@ class SimpleScheduleStore:
         await self.async_save()
 
     async def upsert_group(self, group: ScheduleGroup) -> ScheduleGroup:
-        # Validate season overlaps among members
+        # Schedule windows (member date ranges) must not overlap.
+        # Default/fallback is the catch-all and is exempt.
         members = [self.schedules[mid] for mid in group.member_ids if mid in self.schedules]
+        fallback_id = group.fallback_member_id
         for i, a in enumerate(members):
+            if a.id == fallback_id:
+                continue
             for b in members[i + 1 :]:
+                if b.id == fallback_id:
+                    continue
                 if seasons_overlap(a.date_range, b.date_range):
                     raise ValueError(
-                        f"Overlapping seasons between '{a.name}' and '{b.name}'"
+                        f"Overlapping schedule windows between '{a.name}' and '{b.name}'"
                     )
         self.groups[group.id] = group
         for mid in group.member_ids:
@@ -128,14 +134,21 @@ class SimpleScheduleStore:
         await self.async_save()
 
     def _validate_group_member_seasons(self, schedule: Schedule) -> None:
+        """Reject overlapping schedule windows; fallback/default member is exempt."""
         if not schedule.group_id or schedule.group_id not in self.groups:
+            return
+        group = self.groups[schedule.group_id]
+        fallback_id = group.fallback_member_id
+        if schedule.id == fallback_id:
             return
         for other in self.schedules_in_group(schedule.group_id):
             if other.id == schedule.id:
                 continue
+            if other.id == fallback_id:
+                continue
             if seasons_overlap(schedule.date_range, other.date_range):
                 raise ValueError(
-                    f"Overlapping seasons between '{schedule.name}' and '{other.name}'"
+                    f"Overlapping schedule windows between '{schedule.name}' and '{other.name}'"
                 )
 
     async def ensure_sample_data(self) -> list[str]:

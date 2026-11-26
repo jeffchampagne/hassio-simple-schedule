@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125y sun-aware overlap #C9A227 + warn banner + add-schedule labels */
+/* CACHEBUST:20261125y schedule-window block + sun-aware schedule overlap #C9A227 + labels */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -271,7 +271,7 @@
     "This group card isn’t linked correctly. Re-select the group entity.";
 
   function sscOverlapCopy(other) {
-    return `Window dates overlap with “${other}”. Change Start/End so the ranges don’t share any days.`;
+    return `Schedule window dates overlap with “${other}”. Change Start/End so the ranges don’t share any days.`;
   }
 
   function sscMemberUnavailableCopy(name) {
@@ -547,7 +547,7 @@
     const msg = sscStripHaNoise(err?.message || err);
     let m;
     if (
-      (m = /Overlapping seasons between ['"]([^'"]+)['"] and ['"]([^'"]+)['"]/i.exec(
+      (m = /Overlapping (?:seasons|schedule windows) between ['"]([^'"]+)['"] and ['"]([^'"]+)['"]/i.exec(
         msg
       ))
     ) {
@@ -3967,7 +3967,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         this._attrs?.weekdays
       );
       if (!ids.size) return null;
-      return "Overlapping windows — allowed, but they share hours. Indoor/outdoor usually stay on separate schedules.";
+      return "Overlapping schedules — allowed, but they share hours. Indoor/outdoor usually stay on separate schedules.";
     }
 
     _overlappingIds() {
@@ -5541,12 +5541,19 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
     }
 
     _findSeasonOverlap(m, date_range) {
+      // Schedule windows (member date ranges) must not overlap.
+      // Default/fallback is the catch-all and is exempt.
       if (!date_range) return null;
-      const members = this._state?.attributes?.members || [];
+      const attrs = this._state?.attributes || {};
+      const fallbackId = attrs.fallback_member;
+      if (m?.id && m.id === fallbackId) return null;
+      const members = attrs.members || [];
       for (const other of members) {
-        if (other.id === m.id || !other.date_range) continue;
+        if (other.id === m.id) continue;
+        if (other.id === fallbackId) continue;
+        if (!other.date_range) continue;
         if (seasonsOverlapClient(date_range, other.date_range)) {
-          return other.name || "another window";
+          return other.name || "another schedule window";
         }
       }
       return null;
@@ -6312,11 +6319,13 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
           this._addMemberError = invalid;
           return;
         }
+        const fallbackId = this._state?.attributes?.fallback_member;
         for (const other of members) {
+          if (other.id === fallbackId) continue;
           if (!other.date_range) continue;
           if (seasonsOverlapClient(payload.date_range, other.date_range)) {
             this._addMemberError = sscOverlapCopy(
-              other.name || "another window"
+              other.name || "another schedule window"
             );
             return;
           }

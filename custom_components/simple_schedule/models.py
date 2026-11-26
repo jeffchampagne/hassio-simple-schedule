@@ -386,7 +386,7 @@ class ScheduleGroup:
 
 
 def seasons_overlap(a: DateRange | None, b: DateRange | None, year: int | None = None) -> bool:
-    """Reject overlapping season ranges. Heuristic check across a year."""
+    """True when two schedule-window date ranges share any day (None = year-round/default → no conflict here)."""
     if a is None or b is None:
         return False
     y = year or date.today().year

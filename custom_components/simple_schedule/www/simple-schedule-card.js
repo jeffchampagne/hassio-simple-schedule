@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125z schedule-overlap warn + require_fallback Edit toggle */
+/* CACHEBUST:20261125aa require_fallback Edit toggle as pressed button */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -6235,23 +6235,22 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                             </div>
                           `
                         : ""}
-                      <div
-                        class="row"
-                        style="margin-top:14px;align-items:center;gap:10px"
+                      <button
+                        type="button"
+                        class="linkish ${dontRequire ? "on" : ""}"
+                        style="margin-top:14px;padding:4px 8px;border-radius:6px;border:1px solid ${dontRequire
+                          ? "var(--primary-color)"
+                          : "var(--divider-color)"};background:${dontRequire
+                          ? "var(--primary-color)"
+                          : "var(--card-background-color)"};color:${dontRequire
+                          ? "var(--text-primary-color, #fff)"
+                          : "var(--primary-text-color)"};cursor:pointer;width:100%;text-align:left"
+                        aria-pressed=${dontRequire ? "true" : "false"}
+                        @click=${() =>
+                          this._setDontRequireDefault(!dontRequire)}
                       >
-                        <span style="flex:1;min-width:0"
-                          >Don't require a default schedule window</span
-                        >
-                        <ha-switch
-                          .checked=${dontRequire}
-                          @change=${(e) =>
-                            this._setDontRequireDefault(
-                              Boolean(
-                                (e.currentTarget || e.target)?.checked
-                              )
-                            )}
-                        ></ha-switch>
-                      </div>
+                        Don't require a default schedule window
+                      </button>
                       ${this._groupPatchError
                         ? html`<div class="error" style="margin-top:8px">
                             ${this._groupPatchError}

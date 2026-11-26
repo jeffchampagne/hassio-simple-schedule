@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125ab restore step helpers (Edit expand) + overnight legend copy */
+/* CACHEBUST:20261125ac require_fallback button matches add-new-bar */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -2733,6 +2733,21 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         button.add-new-bar:hover {
           border-color: var(--ssc-accent, #5b7c8a);
           background: var(--ssc-on-bg, rgba(91, 124, 138, 0.14));
+        }
+        /* Pressed/ON for toggles that reuse add-new-bar (e.g. don't-require-default). */
+        button.add-new-bar.on {
+          border-style: solid;
+          border-color: var(--primary-color);
+          color: var(--primary-color);
+          background: var(--secondary-background-color);
+        }
+        button.add-new-bar.on:hover {
+          border-color: var(--primary-color);
+          background: color-mix(
+            in srgb,
+            var(--primary-color) 12%,
+            var(--secondary-background-color)
+          );
         }
         .blank-create {
           display: flex;
@@ -6264,7 +6279,6 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                           `}
                     </div>
                     <div
-                      class="add-new"
                       style="margin-top:10px;padding-top:10px;border-top:1px solid var(--divider-color)"
                     >
                       ${requireFallback
@@ -6277,7 +6291,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                             </div>
                             <div
                               class="row"
-                              style="margin-top:6px;flex-wrap:wrap;gap:6px"
+                              style="margin-top:6px;margin-bottom:10px;flex-wrap:wrap;gap:6px"
                             >
                               ${members.map(
                                 (m) => html`<button
@@ -6306,19 +6320,13 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                         : ""}
                       <button
                         type="button"
-                        class="linkish ${dontRequire ? "on" : ""}"
-                        style="margin-top:14px;padding:4px 8px;border-radius:6px;border:1px solid ${dontRequire
-                          ? "var(--primary-color)"
-                          : "var(--divider-color)"};background:${dontRequire
-                          ? "var(--primary-color)"
-                          : "var(--card-background-color)"};color:${dontRequire
-                          ? "var(--text-primary-color, #fff)"
-                          : "var(--primary-text-color)"};cursor:pointer;width:100%;text-align:left"
+                        class="add-new-bar ${dontRequire ? "on" : ""}"
                         aria-pressed=${dontRequire ? "true" : "false"}
                         @click=${() =>
                           this._setDontRequireDefault(!dontRequire)}
                       >
-                        Don't require a default schedule window
+                        ${dontRequire ? "✓ " : ""}Don't require a default
+                        schedule window
                       </button>
                       ${this._groupPatchError
                         ? html`<div class="error" style="margin-top:8px">

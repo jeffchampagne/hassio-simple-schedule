@@ -7,8 +7,6 @@ It has two parts that work together:
 1. **The integration** — the “brain” that stores your schedules and runs them.
 2. **The cards** — the on-screen editors you add to a dashboard to create and change schedules.
 
-You do **not** need the older “Scheduler” integration. Simple Schedule stands on its own.
-
 ---
 
 ## Two kinds of cards

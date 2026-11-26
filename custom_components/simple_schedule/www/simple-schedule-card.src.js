@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125o Blank create persists entity via Lovelace saveConfig (solo+group) */
+/* simple-schedule-card v0.5.1 */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -116,13 +116,6 @@
     const kept = toDateInputValue(raw);
     if (kept) return kept;
     return which === "start" ? todayIso() : endOfMonthIso();
-  }
-
-  function preferMonthDay(raw, recursYearly) {
-    const s = String(raw || "").trim();
-    if (/^\d{2}-\d{2}$/.test(s)) return true;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
-    return recursYearly !== false;
   }
 
   function fromDateInputValue(iso, preferMd) {
@@ -271,7 +264,7 @@
     "This group card isn’t linked correctly. Re-select the group entity.";
 
   function sscOverlapCopy(other) {
-    return `Window dates overlap with “${other}”. Change Start/End so the ranges don’t share any days.`;
+    return `Schedule window dates overlap with “${other}”. Change Start/End so the ranges don’t share any days.`;
   }
 
   function sscMemberUnavailableCopy(name) {
@@ -319,13 +312,73 @@
     return { service: String(service), target, data };
   }
 
-  function sscNormalizeActionList(raw) {
+  function sscNormalizeWaitStep(raw) {
+    if (raw == null || typeof raw !== "object") return null;
+    const t = raw.type;
+    const looksWait =
+      t === "wait" ||
+      ((t == null || t === "") &&
+        ("seconds" in raw || "minutes" in raw) &&
+        !raw.service &&
+        !raw.action);
+    if (!looksWait) return null;
+    const secs =
+      Math.max(0, Number(raw.seconds) || 0) +
+      Math.max(0, Number(raw.minutes) || 0) * 60;
+    return { type: "wait", seconds: secs | 0 };
+  }
+
+  function sscNormalizeStep(raw) {
+    if (raw == null || raw === "" || raw === false) return null;
+    const wait = sscNormalizeWaitStep(raw);
+    if (wait) return wait;
+    // type:"action" wrapper → strip before WindowAction normalize
+    let payload = raw;
+    if (typeof raw === "object" && raw.type === "action") {
+      const { type, ...rest } = raw;
+      payload = rest;
+    }
+    const action = sscNormalizeAction(payload);
+    return action ? { type: "action", ...action } : null;
+  }
+
+  function sscNormalizeStepList(raw) {
     if (raw == null || raw === "" || raw === false) return [];
     if (Array.isArray(raw)) {
-      return raw.map(sscNormalizeAction).filter(Boolean);
+      return raw.map(sscNormalizeStep).filter(Boolean);
     }
-    const one = sscNormalizeAction(raw);
+    const one = sscNormalizeStep(raw);
     return one ? [one] : [];
+  }
+
+  /** Persist shape: waits keep type; actions stay {service,target,data} (v4-compatible). */
+  function sscStepsToStorage(steps) {
+    return (steps || [])
+      .map((s) => {
+        const step = sscNormalizeStep(s);
+        if (!step) return null;
+        if (step.type === "wait") return { type: "wait", seconds: step.seconds | 0 };
+        return {
+          service: step.service,
+          target: { ...(step.target || {}) },
+          data: { ...(step.data || {}) },
+        };
+      })
+      .filter(Boolean);
+  }
+
+  // Back-compat alias used across the card — now preserves wait steps.
+  function sscNormalizeActionList(raw) {
+    return sscNormalizeStepList(raw);
+  }
+
+  function formatWait(seconds) {
+    const s = Math.max(0, Number(seconds) || 0);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    if (m && r) return `${m}m ${r}s`;
+    if (m) return `${m}m`;
+    return `${r}s`;
   }
 
   function sscActionChipLabel(hass, action, index) {
@@ -547,7 +600,7 @@
     const msg = sscStripHaNoise(err?.message || err);
     let m;
     if (
-      (m = /Overlapping seasons between ['"]([^'"]+)['"] and ['"]([^'"]+)['"]/i.exec(
+      (m = /Overlapping (?:seasons|schedule windows) between ['"]([^'"]+)['"] and ['"]([^'"]+)['"]/i.exec(
         msg
       ))
     ) {
@@ -1040,13 +1093,6 @@
     });
   }
 
-  function scheduleIdFromEntity(entityId, state) {
-    // Prefer unique id from attributes if we stored schedule id — use object path
-    // Entities are simple_schedule.<slug>; services need schedule_id from storage.
-    // We keep schedule_id in attributes via custom — for now parse from attributes windows and use hass connection.
-    return state?.attributes?.schedule_id || null;
-  }
-
 
   function sscActionTargetEntityIds(action) {
     if (!action || typeof action !== "object") return [];
@@ -1056,11 +1102,36 @@
     return [];
   }
 
+  // hass is replaced on every HA state change; cache per (immutable) state object.
+  const sscWatchedIdsCache = new WeakMap();
+  // sun.sun churns elevation/azimuth often; only next_*/today event attrs matter for the strip.
+  const SSC_SUN_WATCH_ATTRS = [
+    "next_dawn",
+    "next_rising",
+    "next_dusk",
+    "next_setting",
+    "dawn",
+    "rising",
+    "dusk",
+    "setting",
+  ];
+
+  function sscSunRelevantChanged(oldState, newState) {
+    if (oldState === newState) return false;
+    if (!oldState || !newState) return true;
+    const oa = oldState.attributes || {};
+    const na = newState.attributes || {};
+    return SSC_SUN_WATCH_ATTRS.some((k) => oa[k] !== na[k]);
+  }
+
   function sscCollectWatchedEntityIds(hass, entityId) {
+    if (!entityId) return new Set();
+    const stateObj = hass?.states?.[entityId];
+    const cached = stateObj && sscWatchedIdsCache.get(stateObj);
+    if (cached && cached.entityId === entityId) return cached.ids;
     const ids = new Set();
-    if (!entityId) return ids;
     ids.add(entityId);
-    const attrs = hass?.states?.[entityId]?.attributes || {};
+    const attrs = stateObj?.attributes || {};
     const considerAction = (a) => {
       for (const act of sscNormalizeActionList(a)) {
         for (const id of sscActionTargetEntityIds(act)) ids.add(id);
@@ -1089,6 +1160,9 @@
       // best-effort; entity_id usually on members[]
       if (typeof mid === "string" && mid) ids.add(`simple_schedule.${mid}`);
     }
+    if (stateObj && typeof stateObj === "object") {
+      sscWatchedIdsCache.set(stateObj, { entityId, ids });
+    }
     return ids;
   }
 
@@ -1096,14 +1170,165 @@
     if (force) return true;
     if (!oldHass || !newHass) return true;
     if (newHass === oldHass) return false;
-    const ids = sscCollectWatchedEntityIds(oldHass, entityId);
-    for (const id of sscCollectWatchedEntityIds(newHass, entityId)) ids.add(id);
-    for (const id of ids) {
-      if (newHass.states?.[id] !== oldHass.states?.[id]) return true;
+    const oldIds = sscCollectWatchedEntityIds(oldHass, entityId);
+    const newIds = sscCollectWatchedEntityIds(newHass, entityId);
+    for (const ids of oldIds === newIds ? [newIds] : [oldIds, newIds]) {
+      for (const id of ids) {
+        const ns = newHass.states?.[id];
+        const os = oldHass.states?.[id];
+        if (ns === os) continue;
+        if (id === "sun.sun") {
+          if (sscSunRelevantChanged(os, ns)) return true;
+          continue;
+        }
+        return true;
+      }
     }
     // Service catalog changes are rare; still refresh when identity flips.
     if (newHass.services !== oldHass.services) return true;
     return false;
+  }
+
+  // One HA event subscription shared by every card instance (incl. group-embedded).
+  const sscActionFailCards = new Set();
+  let sscActionFailUnsub = null;
+  let sscActionFailBindToken = 0;
+  let sscActionFailConnection = null;
+
+  function sscDispatchActionFailed(ev) {
+    for (const card of [...sscActionFailCards]) {
+      try {
+        card._onActionFailed?.(ev);
+      } catch (_err) {
+        /* ignore per-card errors */
+      }
+    }
+  }
+
+  function sscTeardownActionFailBus() {
+    const unsub = sscActionFailUnsub;
+    sscActionFailUnsub = null;
+    sscActionFailConnection = null;
+    sscActionFailBindToken += 1;
+    if (!unsub) return;
+    if (typeof unsub === "function") {
+      try {
+        unsub();
+      } catch (_err) {
+        /* ignore */
+      }
+      return;
+    }
+    if (typeof unsub.then === "function") {
+      unsub
+        .then((fn) => {
+          if (typeof fn === "function") {
+            try {
+              fn();
+            } catch (_err) {
+              /* ignore */
+            }
+          }
+        })
+        .catch(() => {});
+    }
+  }
+
+  function sscEnsureActionFailBus(hass) {
+    const conn = hass?.connection;
+    if (!conn?.subscribeEvents) return;
+    if (sscActionFailUnsub && sscActionFailConnection === conn) return;
+    if (sscActionFailUnsub) sscTeardownActionFailBus();
+    const token = (sscActionFailBindToken += 1);
+    sscActionFailConnection = conn;
+    const pending = conn.subscribeEvents(
+      sscDispatchActionFailed,
+      "simple_schedule_action_failed"
+    );
+    sscActionFailUnsub = pending;
+    pending
+      .then((unsub) => {
+        if (sscActionFailBindToken !== token) {
+          if (typeof unsub === "function") unsub();
+          return;
+        }
+        sscActionFailUnsub = unsub;
+      })
+      .catch(() => {
+        if (sscActionFailBindToken === token) {
+          sscActionFailUnsub = null;
+          sscActionFailConnection = null;
+        }
+      });
+  }
+
+  function sscRegisterActionFailCard(card) {
+    sscActionFailCards.add(card);
+    sscEnsureActionFailBus(card.hass);
+  }
+
+  function sscUnregisterActionFailCard(card) {
+    sscActionFailCards.delete(card);
+    if (sscActionFailCards.size === 0) sscTeardownActionFailBus();
+  }
+
+function coerceWindows(raw) {
+    if (Array.isArray(raw)) return raw.filter((w) => w && typeof w === "object");
+    if (raw && typeof raw === "object") {
+      // Rare: dict keyed by id
+      return Object.values(raw).filter((w) => w && typeof w === "object");
+    }
+    return [];
+  }
+
+/** Minute ranges for overlap + strip — resolves sun/mixed via boundToMinutes(hass). */
+function windowMinuteRanges(hass, w) {
+    const from = w?.from || w?.start;
+    const to = w?.to || w?.end;
+    const a = boundToMinutes(hass, from);
+    const b = boundToMinutes(hass, to);
+    if (a == null || b == null) return null;
+    if (b > a) return [[a, b]];
+    // Overnight / wrap (sunset→sunrise, clock overnight, mixed)
+    return [
+      [a, 1440],
+      [0, b],
+    ];
+  }
+
+function rangesOverlapHalfOpen(a, b) {
+    return a[0] < b[1] && b[0] < a[1];
+  }
+
+function windowsShareDays(a, b, scheduleWeekdays) {
+    const da = effectiveWeekdays(a, scheduleWeekdays);
+    const db = effectiveWeekdays(b, scheduleWeekdays);
+    if (!da.length || !db.length) return true;
+    return da.some((d) => db.includes(d));
+  }
+
+function windowsOverlap(hass, a, b, scheduleWeekdays) {
+    if (!windowsShareDays(a, b, scheduleWeekdays)) return false;
+    const ra = windowMinuteRanges(hass, a);
+    const rb = windowMinuteRanges(hass, b);
+    if (!ra || !rb) return false;
+    for (const x of ra)
+      for (const y of rb) if (rangesOverlapHalfOpen(x, y)) return true;
+    return false;
+  }
+
+function overlappingWindowIds(windows, hass, scheduleWeekdays) {
+    const hit = new Set();
+    const list = windows || [];
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        if (windowsOverlap(hass, list[i], list[j], scheduleWeekdays)) {
+          hit.add(list[i].id);
+          hit.add(list[j].id);
+        }
+      }
+    }
+    return hit;
   }
 
   class SimpleScheduleCard extends LitElement {
@@ -1111,15 +1336,18 @@
     connectedCallback() {
       super.connectedCallback();
       this._bindActionFailListener();
+      this._startNowTimer();
     }
 
     disconnectedCallback() {
       super.disconnectedCallback();
       hideSscTip();
       hideSscConfirm();
-      if (this._unsubActionFail) {
-        this._unsubActionFail();
-        this._unsubActionFail = null;
+      this._teardownActionFailListener();
+      this._stopNowTimer();
+      if (this._toastTimer) {
+        clearTimeout(this._toastTimer);
+        this._toastTimer = null;
       }
     }
 
@@ -1192,30 +1420,60 @@
       if (changed.has("hass")) this._bindActionFailListener();
     }
 
+    _onActionFailed(ev) {
+      const data = ev?.data || {};
+      const entity = this._entityId || this._config?.entity;
+      if (entity && data.entity_id && data.entity_id !== entity) return;
+      const svc = data.service || "action";
+      const friendly = sscServiceFriendlyName(this.hass, svc) || svc;
+      const which = data.which === "end" ? "end" : "start";
+      this._showToast(SSC_ACTION_FIRE_FAIL(friendly, which), "critical");
+    }
+
     _bindActionFailListener() {
-      if (this._unsubActionFail || !this.hass?.connection?.subscribeEvents) return;
-      this._unsubActionFail = this.hass.connection.subscribeEvents((ev) => {
-        const data = ev?.data || {};
-        const entity = this._entityId || this._config?.entity;
-        if (entity && data.entity_id && data.entity_id !== entity) return;
-        const svc = data.service || "action";
-        const friendly = sscServiceFriendlyName(this.hass, svc) || svc;
-        const which = data.which === "end" ? "end" : "start";
-        this._showToast(SSC_ACTION_FIRE_FAIL(friendly, which), "critical");
-      }, "simple_schedule_action_failed");
+      if (!this.hass?.connection?.subscribeEvents) return;
+      sscRegisterActionFailCard(this);
+    }
+
+    _teardownActionFailListener() {
+      sscUnregisterActionFailCard(this);
+    }
+
+    _startNowTimer() {
+      this._stopNowTimer();
+      const arm = () => {
+        const now = new Date();
+        const mins = now.getHours() * 60 + now.getMinutes();
+        // Marker snaps to 15-min cells; fire on each quarter-hour boundary.
+        const nextQ = (Math.floor(mins / 15) + 1) * 15;
+        const delayMin = nextQ - mins;
+        const ms =
+          delayMin * 60 * 1000 -
+          now.getSeconds() * 1000 -
+          now.getMilliseconds();
+        this._nowTimer = setTimeout(() => {
+          this._nowTimer = null;
+          this.requestUpdate();
+          arm();
+        }, Math.max(ms, 250));
+      };
+      arm();
+    }
+
+    _stopNowTimer() {
+      if (this._nowTimer) {
+        clearTimeout(this._nowTimer);
+        this._nowTimer = null;
+      }
     }
 
     _showToast(message, level) {
       this._cardToast = { message, level: level || "critical" };
       if (this._toastTimer) clearTimeout(this._toastTimer);
       this._toastTimer = setTimeout(() => {
+        this._toastTimer = null;
         this._cardToast = null;
       }, 5000);
-    }
-
-    _clearToast() {
-      if (this._toastTimer) clearTimeout(this._toastTimer);
-      this._cardToast = null;
     }
 
     async _ssCall(service, data, opts) {
@@ -1253,6 +1511,8 @@
         /* Card-local accents — do not use theme --state-active-color / --primary-color for headers */
         :host {
           --ssc-accent: #5b7c8a;
+          /* Overlap accent — amber/gold #C9A227; not error/enabled */
+          --ss-overlap: #c9a227;
           --ssc-on-bg: rgba(91, 124, 138, 0.14);
           --ssc-off-bg: var(--secondary-background-color);
         }
@@ -1371,12 +1631,23 @@
         }
         .chip.active {
           background: var(--success-color, #4caf50);
+          border: 1px solid color-mix(in srgb, var(--success-color, #4caf50) 55%, #000);
           color: #000000; /* near-black on green for contrast */
           font-weight: 700;
           gap: 4px;
           vertical-align: middle;
         }
-        .chip.active ha-icon {
+        /* Group: selected window, no member schedule currently running — match Enabled toggle blue */
+        .chip.window-active {
+          background: var(--primary-color);
+          border: 1px solid color-mix(in srgb, var(--primary-color) 55%, #000);
+          color: var(--text-primary-color, #fff);
+          font-weight: 700;
+          gap: 4px;
+          vertical-align: middle;
+        }
+        .chip.active ha-icon,
+        .chip.window-active ha-icon {
           --mdc-icon-size: 14px;
           width: 14px;
           height: 14px;
@@ -1387,12 +1658,14 @@
           margin: 0;
           flex-shrink: 0;
         }
-        .chip.active ha-icon svg {
+        .chip.active ha-icon svg,
+        .chip.window-active ha-icon svg {
           display: block;
           width: 14px;
           height: 14px;
         }
-        .chip.active .chip-label {
+        .chip.active .chip-label,
+        .chip.window-active .chip-label {
           display: inline-flex;
           align-items: center;
           line-height: 1;
@@ -1469,12 +1742,44 @@
           opacity: 0.45;
           z-index: 3;
         }
+        
         .window-card {
           border: 1px solid var(--divider-color);
           border-radius: 8px;
           padding: 10px;
           margin: 8px 0;
           background: var(--secondary-background-color);
+        }
+        /* After .window-card so left rail / tint win over the base border shorthand */
+        .window-card.overlap {
+          border-left: 4px solid var(--ss-overlap);
+          background: color-mix(
+            in srgb,
+            var(--ss-overlap) 12%,
+            var(--secondary-background-color, var(--card-background-color))
+          );
+        }
+        .chip.overlap {
+          background: color-mix(in srgb, var(--ss-overlap) 22%, transparent);
+          color: var(--primary-text-color);
+          border: 1px solid var(--ss-overlap);
+          font-weight: 650;
+        }
+        .warn-banner.overlap {
+          display: block;
+          width: 100%;
+          box-sizing: border-box;
+          margin: 8px 0 0;
+          padding: 10px 12px;
+          border-radius: 0;
+          border-left: 4px solid var(--ss-overlap);
+          background: color-mix(
+            in srgb,
+            var(--ss-overlap) 14%,
+            var(--card-background-color)
+          );
+          color: var(--primary-text-color);
+          font-size: 0.85rem;
         }
         .window-card-head {
           display: flex;
@@ -2506,6 +2811,18 @@
           border-color: var(--ssc-accent, #5b7c8a);
           background: var(--ssc-on-bg, rgba(91, 124, 138, 0.14));
         }
+        /* Pressed/ON for toggles that reuse add-new-bar (don't-require-default). */
+        button.add-new-bar.on {
+          border-style: solid;
+          border-color: var(--primary-color);
+          color: var(--text-primary-color, #fff);
+          background: var(--primary-color);
+        }
+        button.add-new-bar.on:hover {
+          border-color: var(--primary-color);
+          background: color-mix(in srgb, var(--primary-color) 88%, #000);
+          color: var(--text-primary-color, #fff);
+        }
         .blank-create {
           display: flex;
           flex-direction: column;
@@ -2582,7 +2899,8 @@
         }
 
         /* Tooltips use fixed .ssc-floating-tip on document.body (see showSscTip). */
-        .chip.active[data-tip] {
+        .chip.active[data-tip],
+        .chip.window-active[data-tip] {
           cursor: pointer;
         }
         .schedule-details {
@@ -2633,6 +2951,7 @@
         this._createBusy = false;
         if (entityChanged) this._boundEntity = null;
       }
+          this.requestUpdate();
     }
 
     getCardSize() {
@@ -2664,9 +2983,7 @@
 
     async _resolveScheduleId() {
       if (this._scheduleId) return this._scheduleId;
-      // Infer from entity unique objects by matching name + windows via update using object_id path
-      // Services accept schedule_id; we also accept object_id via a helper attribute.
-      // read from hass connection registry of states — use entity object_id as lookup key via update_schedule with schedule_id from config.
+      // Services accept storage ids, object ids, or the entity's object id.
       const eid = this._entityId;
       return this._config.schedule_id || eid?.split(".")[1];
     }
@@ -3070,17 +3387,17 @@
       if (Array.isArray(next.windows)) {
         next.windows = next.windows.map((w) => ({
           ...w,
-          on_start: sscNormalizeActionList(w.on_start),
-          on_end: sscNormalizeActionList(w.on_end),
+          on_start: sscStepsToStorage(w.on_start),
+          on_end: sscStepsToStorage(w.on_end),
           conditions: sscNormalizeConditions(w.conditions),
           condition_match: sscConditionMatchMode(w.condition_match),
         }));
       }
       if ("default_on_start" in next) {
-        next.default_on_start = sscNormalizeActionList(next.default_on_start);
+        next.default_on_start = sscStepsToStorage(next.default_on_start);
       }
       if ("default_on_end" in next) {
-        next.default_on_end = sscNormalizeActionList(next.default_on_end);
+        next.default_on_end = sscStepsToStorage(next.default_on_end);
       }
       return this._ssCall("update_schedule", {
         schedule_id: sid,
@@ -3783,6 +4100,51 @@
       return out.slice(0, 40);
     }
 
+    _headerClass(enabled, status) {
+      // Precedence: Disabled > Warning > Enabled
+      if (!enabled) return "off";
+      if (status === "Out of season") return "warn";
+      return "on";
+    }
+
+    _overlapWarnFor(windows) {
+      const ids = overlappingWindowIds(
+        windows,
+        this.hass,
+        this._attrs?.weekdays
+      );
+      if (!ids.size) return null;
+      return "Warning: You have schedules with times that overlap. This is allowed but is something you should confirm you want.";
+    }
+
+    _overlappingIds() {
+      return overlappingWindowIds(
+        coerceWindows(this._attrs.windows),
+        this.hass,
+        this._attrs?.weekdays
+      );
+    }
+
+    _addWaitStep(windowId, field) {
+      const list = sscNormalizeStepList(
+        coerceWindows(this._attrs.windows).find((x) => x.id === windowId)?.[field]
+      );
+      const next = [...list, { type: "wait", seconds: 30 }];
+      this._patchWindow(windowId, { [field]: sscStepsToStorage(next) });
+    }
+
+    _updateWaitSeconds(windowId, field, index, seconds) {
+      const list = sscNormalizeStepList(
+        coerceWindows(this._attrs.windows).find((x) => x.id === windowId)?.[field]
+      );
+      const next = list.map((s, i) =>
+        i === index
+          ? { type: "wait", seconds: Math.max(0, Number(seconds) || 0) }
+          : s
+      );
+      this._patchWindow(windowId, { [field]: sscStepsToStorage(next) });
+    }
+
     render() {
       if (!this._entityId) {
         return this._renderBlankCreate();
@@ -3812,10 +4174,7 @@
       const status = this._statusText();
       const now = new Date();
       const nowQ = Math.floor((now.getHours() * 60 + now.getMinutes()) / 15);
-      const hourLabels =
-        fmt === "24"
-          ? [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
-          : [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24];
+      const hourLabels = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24];
 
       const embedded = Boolean(this._config.embedded || this._config.editor_only);
       const showExpanded = embedded || this._expanded;
@@ -3825,7 +4184,7 @@
           ${embedded
             ? ""
             : html`
-                <div class="header ${enabled ? "on" : "off"}">
+                <div class="header ${this._headerClass(enabled, status)}">
                   ${this._renderEditableTitle()}
                   <span class="muted" style="color:inherit">${enabled ? "Enabled" : "Disabled"}</span>
                   <ha-switch
@@ -3924,7 +4283,7 @@
                       </div>
                       ${overnight
                         ? html`<div class="muted" style="font-size:0.7rem;margin-top:2px">
-                            ↺ overnight window (split bands) · DOW = start day
+                            This is an overnight schedule. All actions are based on the day the schedule starts.
                           </div>`
                         : ""}
                     </div>
@@ -3933,7 +4292,7 @@
                       ${this._adding
                         ? html`
                             <div style="margin-top:0">
-                              <strong>Add new window</strong>
+                              <strong>Add new schedule</strong>
                             </div>
                             <div style="margin-top:10px">
                               <div class="muted" style="font-weight:600">From</div>
@@ -4007,7 +4366,7 @@
                                   if (!this._error) this._adding = false;
                                 }}
                               >
-                                Add Window
+                                Add Schedule
                               </button>
                               <button
                                 type="button"
@@ -4043,10 +4402,14 @@
                           `}
                     </div>
 
+                    ${this._overlapWarnFor(windows)
+                      ? html`<div class="warn-banner overlap">${this._overlapWarnFor(windows)}</div>`
+                      : ""}
                     ${windows.map((w) => {
                       const winOpen = this._expandedWindowId === w.id;
+                      const overlaps = this._overlappingIds().has(w.id);
                       return html`
-                        <div class="window-card">
+                        <div class="window-card ${overlaps ? "overlap" : ""}">
                           <div
                             class="window-card-head"
                             @click=${() => {
@@ -4066,6 +4429,9 @@
                                       @mouseenter=${sscTipEnter}
                                       @mouseleave=${sscTipLeave}
                                     ></ha-icon>`
+                                  : ""}
+                                ${overlaps
+                                  ? html`<span class="chip overlap">Overlaps</span>`
                                   : ""}
                               </div>
                               ${winOpen
@@ -4199,10 +4565,11 @@
     }
 
     _beginActionEdit(windowId, field, index) {
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
       const existing = index == null ? null : list[index];
+      if (existing?.type === "wait") return;
       this._actionEditKey = this._actionEditKeyFor(
         windowId,
         field,
@@ -4232,14 +4599,18 @@
         this._errorLevel = "warning";
         return;
       }
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
-      const next = list.map((a) => ({
-        service: a.service,
-        target: { ...(a.target || {}) },
-        data: { ...(a.data || {}) },
-      }));
+      const next = list.map((s) =>
+        s.type === "wait"
+          ? { type: "wait", seconds: s.seconds | 0 }
+          : {
+              service: s.service,
+              target: { ...(s.target || {}) },
+              data: { ...(s.data || {}) },
+            }
+      );
       if (token === "new") next.push(draft);
       else {
         const idx = Number(token);
@@ -4248,23 +4619,23 @@
       }
       this._error = null;
       this._clearActionEdit();
-      this._patchWindow(windowId, { [field]: next });
+      this._patchWindow(windowId, { [field]: sscStepsToStorage(next) });
     }
 
     _removeActionAt(windowId, field, index) {
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
       const next = list.filter((_, i) => i !== index);
       if ((this._actionEditKey || "").startsWith(`${windowId}:${field}:`)) {
         this._clearActionEdit();
       }
-      this._patchWindow(windowId, { [field]: next });
+      this._patchWindow(windowId, { [field]: sscStepsToStorage(next) });
     }
 
     _reorderActions(windowId, field, fromIndex, toIndex) {
       if (fromIndex === toIndex || fromIndex == null || toIndex == null) return;
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
       if (
@@ -4274,21 +4645,25 @@
         toIndex >= list.length
       )
         return;
-      const next = list.map((a) => ({
-        service: a.service,
-        target: { ...(a.target || {}) },
-        data: { ...(a.data || {}) },
-      }));
+      const next = list.map((s) =>
+        s.type === "wait"
+          ? { type: "wait", seconds: s.seconds | 0 }
+          : {
+              service: s.service,
+              target: { ...(s.target || {}) },
+              data: { ...(s.data || {}) },
+            }
+      );
       const [item] = next.splice(fromIndex, 1);
       next.splice(toIndex, 0, item);
       if ((this._actionEditKey || "").startsWith(`${windowId}:${field}:`)) {
         this._clearActionEdit();
       }
-      this._patchWindow(windowId, { [field]: next });
+      this._patchWindow(windowId, { [field]: sscStepsToStorage(next) });
     }
 
     _renderActionPicker(w, field, label, hint) {
-      const actions = sscNormalizeActionList(w[field]);
+      const actions = sscNormalizeStepList(w[field]);
       const editKey = this._actionEditKey || "";
       const prefix = `${w.id}:${field}:`;
       const editing = editKey.startsWith(prefix);
@@ -4564,9 +4939,34 @@
                 }}
               >
                 <span class="drag-handle" aria-hidden="true">⋮⋮</span>
-                <span class="chip-label"
-                  >${sscActionChipLabel(this.hass, act, i)}</span
-                >
+                ${act.type === "wait"
+                  ? html`<span class="chip-label"
+                        >${i + 1} · Wait</span
+                      >
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        style="width:64px;margin:0 4px"
+                        title="Duration in seconds"
+                        .value=${String(act.seconds ?? 0)}
+                        @click=${(e) => e.stopPropagation()}
+                        @change=${(e) => {
+                          e.stopPropagation();
+                          this._updateWaitSeconds(
+                            w.id,
+                            field,
+                            i,
+                            e.target.value
+                          );
+                        }}
+                      />
+                      <span class="muted" style="margin-right:4px"
+                        >sec (${formatWait(act.seconds)})</span
+                      >`
+                  : html`<span class="chip-label"
+                      >${sscActionChipLabel(this.hass, act, i)}</span
+                    >`}
                 <button
                   type="button"
                   class="chip-x"
@@ -4583,7 +4983,7 @@
           </div>
           ${actions.length
             ? html`<div class="action-order-hint">
-                Actions are executed in the order above, drag to rearrange
+                Actions and waits run in order above — drag to rearrange
               </div>`
             : ""}
           ${editing
@@ -4821,6 +5221,12 @@
                 >
                   Add action
                 </button>
+                <button
+                  type="button"
+                  @click=${() => this._addWaitStep(w.id, field)}
+                >
+                  Add wait
+                </button>
               </div>`}
         </div>
       `;
@@ -4945,12 +5351,9 @@
       return document.createElement("simple-schedule-card-editor");
     }
 
-    static getStubConfig(hass) {
-      const entity =
-        Object.keys(hass.states).find((e) =>
-          e.startsWith("simple_schedule.") && !e.includes(".group_")
-        ) || "simple_schedule.sample_classroom_hours";
-      return { type: "custom:simple-schedule-card", entity, time_format: "12" };
+    static getStubConfig() {
+      // Leave entity blank so Add Card shows the create-schedule flow.
+      return { type: "custom:simple-schedule-card", time_format: "12" };
     }
   }
 
@@ -4959,6 +5362,10 @@
       super.disconnectedCallback();
       hideSscTip();
       hideSscConfirm();
+      if (this._toastTimer) {
+        clearTimeout(this._toastTimer);
+        this._toastTimer = null;
+      }
     }
 
     get hass() {
@@ -5002,7 +5409,11 @@
         _seasonErrorMemberId: { type: String },
         _memberRenameError: { type: String },
         _groupRenameError: { type: String },
+        _groupPatchError: { type: String },
         _memberSeasonOverride: {},
+        _createName: { type: String },
+        _createError: { type: String },
+        _createBusy: { type: Boolean },
       };
     }
 
@@ -5045,6 +5456,7 @@
       this._cardToast = { message, level: level || "critical" };
       if (this._toastTimer) clearTimeout(this._toastTimer);
       this._toastTimer = setTimeout(() => {
+        this._toastTimer = null;
         this._cardToast = null;
       }, 5000);
     }
@@ -5056,6 +5468,7 @@
       } catch (err) {
         const msg = sscUserError(err, opts?.ctx);
         if (opts?.inline === "add") this._addMemberError = msg;
+        else if (opts?.inline === "create") this._createError = msg;
         else if (opts?.inline === "season") {
           this._seasonError = msg;
           this._seasonErrorMemberId = opts?.memberId || null;
@@ -5073,8 +5486,9 @@
     }
 
     setConfig(config) {
-      if (!config?.entity) throw new Error("entity is required");
-      this._config = config;
+      // entity is optional — blank card shows create-group empty state.
+      const cfg = config || {};
+      this._config = cfg;
       this._expandedId = null;
       this._memberEditors = {};
       this._renaming = false;
@@ -5090,14 +5504,184 @@
       this._newMemberYearly = true;
       this._addMemberError = null;
       this._pendingExpandName = null;
+      this._createName = this._createName || "";
+      this._createError = null;
+      this._createBusy = false;
     }
 
     getCardSize() {
-      return 6;
+      return this._config?.entity ? 6 : 4;
+    }
+
+    static getConfigElement() {
+      return document.createElement("simple-schedule-card-editor");
+    }
+
+    static getStubConfig() {
+      // Leave entity blank so Add Card shows the create-group flow.
+      return { type: "custom:simple-schedule-group-card", time_format: "12" };
     }
 
     get _state() {
-      return this.hass?.states?.[this._config.entity];
+      const eid = this._config?.entity;
+      if (!eid) return null;
+      return this.hass?.states?.[eid];
+    }
+
+    _slugifyName(name) {
+      return String(name || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 64) || "schedule_group";
+    }
+
+    async _waitForEntity(entityId, timeoutMs = 8000) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (this.hass?.states?.[entityId]) return true;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      return Boolean(this.hass?.states?.[entityId]);
+    }
+
+    async _persistLovelaceCardConfig(prevConfig, nextConfig) {
+      this.dispatchEvent(
+        new CustomEvent("config-changed", {
+          detail: { config: nextConfig },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      const lovelace =
+        this.hass?.connection &&
+        (this._getLovelace?.() ||
+          (() => {
+            let el = this;
+            while (el) {
+              if (el.lovelace) return el.lovelace;
+              el = el.parentElement || el.getRootNode?.()?.host;
+            }
+            return null;
+          })());
+      // Prefer parent solo helper when available; otherwise config-changed is enough.
+      if (!lovelace || typeof lovelace.saveConfig !== "function") return false;
+      if (lovelace.mode === "yaml") return false;
+      try {
+        const liveRoot = lovelace.rawConfig || lovelace.config;
+        if (!liveRoot) return false;
+        const clone = JSON.parse(JSON.stringify(liveRoot));
+        // Replace first blank group card, else first matching config object.
+        let replaced = false;
+        const walk = (node, parent, key) => {
+          if (replaced) return;
+          if (Array.isArray(node)) {
+            node.forEach((child, i) => walk(child, node, i));
+            return;
+          }
+          if (!node || typeof node !== "object") return;
+          const t = String(node.type || "");
+          const isGroup =
+            t === "custom:simple-schedule-group-card" ||
+            t === "simple-schedule-group-card";
+          if (isGroup && !node.entity && parent != null) {
+            parent[key] = { ...node, ...nextConfig };
+            replaced = true;
+            return;
+          }
+          for (const k of Object.keys(node)) walk(node[k], node, k);
+        };
+        walk(clone, null, null);
+        if (replaced) {
+          await lovelace.saveConfig(clone);
+          return true;
+        }
+      } catch (err) {
+        console.warn("simple-schedule-group-card: Lovelace save failed", err);
+      }
+      return false;
+    }
+
+    async _bindGroupEntity(entityId) {
+      const prevConfig = this._config || {};
+      const next = {
+        ...prevConfig,
+        type: "custom:simple-schedule-group-card",
+        entity: entityId,
+        time_format: prevConfig.time_format || "12",
+      };
+      const saved = await this._persistLovelaceCardConfig(prevConfig, next);
+      this._config = next;
+      if (!saved) {
+        console.warn(
+          "simple-schedule-group-card: bound entity in-session only; Lovelace config may need a save."
+        );
+      }
+      this.requestUpdate();
+    }
+
+    async _createGroupFromBlank() {
+      const name = String(this._createName || "").trim();
+      this._createError = null;
+      if (!name) {
+        this._createError = "Enter a name for the new schedule group.";
+        return;
+      }
+      this._createBusy = true;
+      try {
+        const slug = this._slugifyName(name);
+        const ok = await this._ssCall(
+          "create_group",
+          { name, object_id: slug },
+          { inline: "create", ctx: { create: true } }
+        );
+        if (!ok) return;
+        const entityId = `simple_schedule.group_${slug}`;
+        await this._waitForEntity(entityId);
+        this._createName = "";
+        await this._bindGroupEntity(entityId);
+      } finally {
+        this._createBusy = false;
+      }
+    }
+
+    _renderBlankGroupCreate() {
+      return html`
+        <ha-card>
+          <div class="body blank-create">
+            <h2>New Schedule Group</h2>
+            <div class="hint">
+              Create a group of schedules where only one is active at a time
+              (for example Normal, Halloween, and Christmas).
+            </div>
+            <div class="date-row name-row">
+              <span class="muted">Name</span>
+              <input
+                type="text"
+                .value=${this._createName || ""}
+                placeholder="e.g. Outdoor Lights"
+                ?disabled=${this._createBusy}
+                @input=${(e) => {
+                  this._createName = e.target.value;
+                  this._createError = null;
+                }}
+                @keydown=${(e) => {
+                  if (e.key === "Enter") this._createGroupFromBlank();
+                }}
+              />
+            </div>
+            ${sscChip(html, this._createError, "critical")}
+            <button
+              type="button"
+              class="add-new-bar"
+              ?disabled=${this._createBusy}
+              @click=${() => this._createGroupFromBlank()}
+            >
+              ${this._createBusy ? "Creating…" : "Create schedule group"}
+            </button>
+          </div>
+        </ha-card>
+      `;
     }
 
     get _groupId() {
@@ -5288,12 +5872,19 @@
     }
 
     _findSeasonOverlap(m, date_range) {
+      // Schedule windows (member date ranges) must not overlap.
+      // Default/fallback is the catch-all and is exempt.
       if (!date_range) return null;
-      const members = this._state?.attributes?.members || [];
+      const attrs = this._state?.attributes || {};
+      const fallbackId = attrs.fallback_member;
+      if (m?.id && m.id === fallbackId) return null;
+      const members = attrs.members || [];
       for (const other of members) {
-        if (other.id === m.id || !other.date_range) continue;
+        if (other.id === m.id) continue;
+        if (other.id === fallbackId) continue;
+        if (!other.date_range) continue;
         if (seasonsOverlapClient(date_range, other.date_range)) {
-          return other.name || "another window";
+          return other.name || "another schedule window";
         }
       }
       return null;
@@ -5399,6 +5990,9 @@
     }
 
     render() {
+      if (!this._config?.entity) {
+        return this._renderBlankGroupCreate();
+      }
       const st = this._state;
       if (!st) {
         return html`<ha-card
@@ -5406,9 +6000,14 @@
         >`;
       }
       const a = st.attributes || {};
-      const members = a.members || [];
+      const members = Array.isArray(a.members) ? a.members : [];
       const sticky = Boolean(a.sticky);
-      const enabledMember = a.enabled_member;
+      const rawEnabled = a.enabled_member;
+      const enabledMember =
+        rawEnabled && rawEnabled !== "none" ? rawEnabled : null;
+      const requireFallback = a.require_fallback !== false;
+      const dontRequire = !requireFallback;
+      const fallbackId = a.fallback_member;
 
       return html`
         <ha-card>
@@ -5471,14 +6070,24 @@
           </div>
           <div class="body">
             ${sscToastMarkup(html, this._cardToast)}
+            ${dontRequire && !enabledMember
+              ? html`<div
+                  class="muted"
+                  style="margin-bottom:10px;padding:10px 12px;width:100%;box-sizing:border-box;border-left:4px solid var(--disabled-color, #9e9e9e);background:var(--secondary-background-color)"
+                >
+                  No schedule window is active. A default schedule is not
+                  required for this group.
+                </div>`
+              : ""}
             ${members.map((m) => {
               const selected = m.id === enabledMember;
               const isSticky = selected && sticky;
               const expanded = this._expandedId === m.id;
               const isDefault = this._isDefaultMember(m, a, members);
               const memberEnabled = m.season_available !== false;
-              const memAttrs =
-                this.hass?.states?.[m.entity_id]?.attributes || {};
+              const memberState = this.hass?.states?.[m.entity_id];
+              const memberRunning = selected && memberState?.state === "on";
+              const memAttrs = memberState?.attributes || {};
               const fmt = this._config?.time_format || "12";
               const memberWinSum =
                 m.windows_summary ||
@@ -5567,7 +6176,7 @@
                               : ""}
                             ${selected
                               ? html`<span
-                                  class="chip active"
+                                  class="chip ${memberRunning ? "active" : "window-active"}"
                                   data-tip=${isSticky
                                     ? "Click to unlock this schedule window and allow the normal group schedule to resume"
                                     : "Click to keep this schedule window active until you unlock it"}
@@ -5580,14 +6189,20 @@
                                     this._confirmActiveChip(m, isSticky);
                                   }}
                                 >
-                                  <span class="chip-label">Active</span>
+                                  <span class="chip-label"
+                                    >${memberRunning ? "Active Now" : "Active"}</span
+                                  >
                                   ${isSticky
                                     ? html`<ha-icon icon="mdi:lock"></ha-icon>`
                                     : ""}
                                 </span>`
                               : ""}
                             ${isDefault
-                              ? html`<span class="chip default">Default</span>`
+                              ? html`<span
+                                  class="chip default"
+                                  title="This schedule window is the default for this group. That means it will become active when no other schedule applies."
+                                  >Default</span
+                                >`
                               : ""}
                           </div>`
                         : ""}
@@ -5657,7 +6272,11 @@
                     ? html`<div class="body">
                         ${isDefault
                           ? html`<div class="active-window-row">
-                              <span class="chip default">Default</span>
+                              <span
+                                class="chip default"
+                                title="This schedule window is the default for this group. That means it will become active when no other schedule applies."
+                                >Default</span
+                              >
                               <span class="muted" style="flex:1"
                                 >This schedule window is currently the default
                                 for this group, which means it will be active
@@ -5875,8 +6494,9 @@
                                   </div>
                                 `
                               : html`<div class="muted" style="margin-top:8px">
-                                  First schedule in the group becomes the
-                                  default (no season dates).
+                                  ${dontRequire
+                                    ? "First schedule starts with no default required."
+                                    : "First schedule in the group becomes the default (no season dates)."}
                                 </div>`}
                             <div class="add-actions">
                               <button
@@ -5884,7 +6504,7 @@
                                 class="primary"
                                 @click=${() => this._addGroupMember()}
                               >
-                                Add schedule
+                                Save schedule window
                               </button>
                               <button
                                 type="button"
@@ -5914,6 +6534,66 @@
                               Add a new schedule window
                             </button>
                           `}
+                    </div>
+                    <div
+                      style="margin-top:10px;padding-top:10px;border-top:1px solid var(--divider-color)"
+                    >
+                      ${requireFallback
+                        ? html`
+                            <div class="muted" style="font-weight:600">
+                              Default schedule
+                            </div>
+                            <div class="muted">
+                              Used when no seasonal member matches today’s date.
+                            </div>
+                            <div
+                              class="row"
+                              style="margin-top:6px;margin-bottom:10px;flex-wrap:wrap;gap:6px"
+                            >
+                              ${members.map(
+                                (m) => html`<button
+                                  type="button"
+                                  class="linkish ${fallbackId === m.id
+                                    ? "on"
+                                    : ""}"
+                                  style="padding:4px 8px;border-radius:6px;border:1px solid var(--divider-color);background:${fallbackId ===
+                                  m.id
+                                    ? "var(--primary-color)"
+                                    : "var(--card-background-color)"};color:${fallbackId ===
+                                  m.id
+                                    ? "var(--text-primary-color, #fff)"
+                                    : "var(--primary-text-color)"};cursor:pointer"
+                                  @click=${() =>
+                                    this._patchGroup({
+                                      require_fallback: true,
+                                      fallback_member_id: m.id,
+                                    })}
+                                >
+                                  ${m.name}
+                                </button>`
+                              )}
+                            </div>
+                          `
+                        : ""}
+                      <button
+                        type="button"
+                        class="add-new-bar ${dontRequire ? "on" : ""}"
+                        aria-pressed=${dontRequire ? "true" : "false"}
+                        title=${dontRequire
+                          ? "Click to require a default schedule window for this group. Default windows apply when no other schedule is active."
+                          : "Click to not require a default schedule window for this group. This will allow periods where no schedule is active for this group."}
+                        @click=${() =>
+                          this._setDontRequireDefault(!dontRequire)}
+                      >
+                        ${dontRequire
+                          ? "Require a default schedule window"
+                          : "Don't require a default schedule window"}
+                      </button>
+                      ${this._groupPatchError
+                        ? html`<div class="error" style="margin-top:8px">
+                            ${this._groupPatchError}
+                          </div>`
+                        : ""}
                     </div>
                     <button
                       type="button"
@@ -6043,11 +6723,13 @@
           this._addMemberError = invalid;
           return;
         }
+        const fallbackId = this._state?.attributes?.fallback_member;
         for (const other of members) {
+          if (other.id === fallbackId) continue;
           if (!other.date_range) continue;
           if (seasonsOverlapClient(payload.date_range, other.date_range)) {
             this._addMemberError = sscOverlapCopy(
-              other.name || "another window"
+              other.name || "another schedule window"
             );
             return;
           }
@@ -6066,8 +6748,60 @@
       this._addMemberError = null;
     }
 
+    async _patchGroup(patch) {
+      this._groupPatchError = null;
+      const a = this._state?.attributes || {};
+      const requireFallback =
+        patch.require_fallback !== undefined
+          ? Boolean(patch.require_fallback)
+          : a.require_fallback !== false;
+      const fallback =
+        patch.fallback_member_id !== undefined
+          ? patch.fallback_member_id
+          : a.fallback_member;
+      if (requireFallback && !fallback) {
+        this._groupPatchError =
+          "Pick a default schedule, or turn on “Don’t require a default schedule window”.";
+        return false;
+      }
+      const gid = this._groupId;
+      if (!gid) return false;
+      return await this._ssCall("update_group", {
+        group_id: gid,
+        ...patch,
+      });
+    }
+
+    async _setDontRequireDefault(on) {
+      if (on) {
+        await this._patchGroup({
+          require_fallback: false,
+          fallback_member_id: null,
+        });
+      } else {
+        const a = this._state?.attributes || {};
+        const members = a.members || [];
+        const keep =
+          a.fallback_member ||
+          members.find((m) => !m.date_range)?.id ||
+          members[0]?.id ||
+          null;
+        if (!keep) {
+          this._groupPatchError =
+            "Add a member before requiring a default schedule.";
+          return;
+        }
+        await this._patchGroup({
+          require_fallback: true,
+          fallback_member_id: keep,
+        });
+      }
+    }
+
     _isDefaultMember(m, a, members) {
       const list = members || a?.members || [];
+      // When the group does not require a default, nothing is "the Default".
+      if (a?.require_fallback === false) return false;
       if (list.length === 1) return true;
       if (a?.fallback_member === m.id) return true;
       // Undated member is the seasonal fallback when no other window matches.
@@ -6099,6 +6833,7 @@
       if (gid) {
         await this._ssCall("update_group", {
           group_id: gid,
+          require_fallback: true,
           fallback_member_id: m.id,
         });
       }
@@ -6218,51 +6953,128 @@
         }
       }
     }
-
-    static getStubConfig(hass) {
-      const entity =
-        Object.keys(hass.states).find((e) =>
-          e.startsWith("simple_schedule.group_")
-        ) || "simple_schedule.group_sample_outdoor_lighting";
-      return { type: "custom:simple-schedule-group-card", entity };
-    }
   }
 
   class SimpleScheduleCardEditor extends LitElement {
     static get properties() {
       return { hass: {}, _config: {} };
     }
-    setConfig(config) {
-      this._config = config;
+
+    static get styles() {
+      return css`
+        .wrap {
+          padding: 8px 0;
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+        }
+        .label {
+          font-weight: 600;
+          margin-bottom: 6px;
+        }
+        .hint {
+          color: var(--secondary-text-color);
+          font-size: 0.85rem;
+          margin-top: 4px;
+        }
+        .tf-row {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .tf-row button {
+          padding: 8px 14px;
+          border-radius: 8px;
+          border: 1px solid var(--divider-color);
+          background: var(--card-background-color);
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font-weight: 600;
+        }
+        .tf-row button.on {
+          background: var(--primary-color);
+          color: var(--text-primary-color, #fff);
+          border-color: var(--primary-color);
+        }
+        ha-entity-picker {
+          display: block;
+          width: 100%;
+        }
+      `;
     }
+
+    setConfig(config) {
+      this._config = config || {};
+    }
+
+    get _fmt() {
+      return String(this._config?.time_format || "12") === "24" ? "24" : "12";
+    }
+
+    get _isGroupCard() {
+      const t = this._config?.type || "";
+      return t.includes("simple-schedule-group-card");
+    }
+
     render() {
+      if (!this._config) return html``;
+      const fmt = this._fmt;
+      const isGroup = this._isGroupCard;
+      const entityLabel = isGroup
+        ? "Existing group (optional)"
+        : "Existing schedule (optional)";
+      const hint = isGroup
+        ? "Leave blank to create a new schedule group on the card. Pick a group entity only if you want to show one that already exists."
+        : "Leave blank to create a new schedule on the card. Pick an entity only if you want to show one that already exists.";
       return html`
-        <div style="padding:8px">
-          <div>Entity</div>
-          <input
-            type="text"
-            style="width:100%"
-            .value=${this._config?.entity || ""}
-            @change=${(e) => this._update({ entity: e.target.value })}
-          />
-          <div style="margin-top:8px">time_format (12|24)</div>
-          <input
-            type="text"
-            .value=${this._config?.time_format || "12"}
-            @change=${(e) => this._update({ time_format: e.target.value })}
-          />
-          <div style="margin-top:8px">schedule_id (optional override)</div>
-          <input
-            type="text"
-            style="width:100%"
-            .value=${this._config?.schedule_id || ""}
-            @change=${(e) => this._update({ schedule_id: e.target.value })}
-          />
+        <div class="wrap">
+          <div>
+            <div class="label">${entityLabel}</div>
+            <ha-entity-picker
+              .hass=${this.hass}
+              .value=${this._config.entity || ""}
+              .includeDomains=${["simple_schedule"]}
+              .label=${entityLabel}
+              .placeholder=${"Optional — leave blank for new"}
+              allow-custom-entity
+              @value-changed=${this._entityChanged}
+            ></ha-entity-picker>
+            <div class="hint">${hint}</div>
+          </div>
+          <div>
+            <div class="label">Time format</div>
+            <div class="tf-row">
+              <button
+                type="button"
+                class="${fmt === "12" ? "on" : ""}"
+                @click=${() => this._update({ time_format: "12" })}
+              >
+                12-hour
+              </button>
+              <button
+                type="button"
+                class="${fmt === "24" ? "on" : ""}"
+                @click=${() => this._update({ time_format: "24" })}
+              >
+                24-hour
+              </button>
+            </div>
+          </div>
         </div>
       `;
     }
+
+    _entityChanged(ev) {
+      const value = ev.detail?.value ?? "";
+      // Blank is intentional for the create-new flow — do not treat as required.
+      this._update({ entity: value || undefined });
+    }
+
     _update(patch) {
-      this._config = { ...this._config, ...patch };
+      // Preserve YAML-only keys (e.g. schedule_id) — not shown in UI
+      const next = { ...this._config, ...patch };
+      if (!next.entity) delete next.entity;
+      this._config = next;
       this.dispatchEvent(
         new CustomEvent("config-changed", {
           detail: { config: this._config },
@@ -6272,9 +7084,6 @@
       );
     }
   }
-
-  // Expose schedule_id on state attributes by monkey-patching is hard;
-  // instead enrich via card config. Also fix: entity uses friendly name from HA.
 
   if (!customElements.get("simple-schedule-card")) {
     customElements.define("simple-schedule-card", SimpleScheduleCard);
@@ -6291,14 +7100,18 @@
     window.customCards.push({
       type: "simple-schedule-card",
       name: "Simple Schedule Card",
-      description: "Weekly availability windows with optional scene/script hooks",
+      description:
+        "Create a set of schedules that can operate independently.",
+      preview: false,
     });
   }
   if (!window.customCards.some((c) => c.type === "simple-schedule-group-card")) {
     window.customCards.push({
       type: "simple-schedule-group-card",
       name: "Simple Schedule Group Card",
-      description: "Exclusive schedule group with seasons + sticky select",
+      description:
+        "Create a group of schedules where only one schedule is active at any given time. Example: A Normal, Halloween, and Christmas lighting schedule",
+      preview: false,
     });
   }
   }; // end boot

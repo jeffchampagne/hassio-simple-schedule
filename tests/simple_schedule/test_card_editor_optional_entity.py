@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-CARD = ROOT / "custom_components" / "simple_schedule" / "www" / "simple-schedule-card.js"
+# Assert against editable source; minified JS collapses whitespace in stub returns.
+CARD = ROOT / "custom_components" / "simple_schedule" / "www" / "simple-schedule-card.src.js"
 
 
 class CardEditorOptionalEntityTests(unittest.TestCase):

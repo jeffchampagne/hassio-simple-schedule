@@ -23,14 +23,25 @@ ATTR_SEASON_AVAILABLE = "season_available"
 ATTR_IN_SEASON = "in_season"
 ATTR_DEFAULT_ON_START = "default_on_start"
 ATTR_DEFAULT_ON_END = "default_on_end"
-ATTR_STICKY = "sticky"
-ATTR_ENABLED_MEMBER = "enabled_member"
-ATTR_ACTIVE_MEMBER = "active_member"
-ATTR_FALLBACK_MEMBER = "fallback_member"
-ATTR_MEMBERS = "members"
-ATTR_EXCLUSIVE = "exclusive"
 
 CONF_CREATE_SAMPLE = "create_sample"
+
+# Backup poll: point timers + condition listeners cover most transitions.
+# 60 s keeps worst-case catch-up short when a timer drifts; sun.sun next_*
+# attribute changes also trigger an immediate replan.
+TICK_INTERVAL_SECONDS = 60
+SUN_ENTITY_ID = "sun.sun"
+# Attributes that affect bound resolution (see evaluator.SUN_ATTR / SUN_ATTR_TODAY).
+SUN_REPLAN_ATTRS = (
+    "next_dawn",
+    "next_rising",
+    "next_dusk",
+    "next_setting",
+    "dawn",
+    "rising",
+    "dusk",
+    "setting",
+)
 
 EVENT_WINDOW_STARTED = f"{DOMAIN}_window_started"
 EVENT_WINDOW_ENDED = f"{DOMAIN}_window_ended"
@@ -41,8 +52,6 @@ SUN_KINDS = ("dawn", "sunrise", "dusk", "sunset")
 BOUND_KINDS = ("clock",) + SUN_KINDS
 # Legacy entity-id actions only; new actions allow any domain.service (no allowlist).
 LEGACY_ACTION_DOMAINS = ("scene", "script")
-# Back-compat alias used by older call sites during transition.
-ACTION_DOMAINS = LEGACY_ACTION_DOMAINS
 
 CONDITION_OPS = ("=", "!=", "<", ">")
 CONDITION_NUMERIC_OPS = ("<", ">")

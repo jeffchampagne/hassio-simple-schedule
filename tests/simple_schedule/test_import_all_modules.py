@@ -70,7 +70,7 @@ class ImportAllModulesTests(unittest.TestCase):
             hasattr(models, "ScheduleStep"),
             "models.py must export ScheduleStep (evaluator imports it)",
         )
-        # ScheduleStep = WindowAction | WaitStep (typing.Union / | )
+        # Union of WindowAction | WaitStep (not an ActionStep alias)
         self.assertTrue(hasattr(models, "WindowAction"))
         self.assertTrue(hasattr(models, "WaitStep"))
         self.assertFalse(

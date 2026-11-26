@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  python:
+    name: Import modules + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Import every companion module
+        run: |
+          python -m unittest -v tests.simple_schedule.test_import_all_modules
+
+      - name: Run offline Simple Schedule tests
+        run: |
+          python -m unittest -v tests.simple_schedule.test_simple_schedule_logic

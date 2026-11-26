@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.core import callback
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.restore_state import RestoreEntity
+
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -23,8 +24,8 @@ from .const import (
     ATTR_WINDOWS,
     DOMAIN,
 )
-from .evaluator import active_interval, next_transition
-from .models import Schedule, ScheduleGroup, steps_to_storage
+from .evaluator import active_interval, active_intervals, next_transition
+from .models import Schedule, ScheduleGroup, WaitStep, step_to_storage
 
 
 class SimpleScheduleEntity(RestoreEntity, Entity):
@@ -33,18 +34,16 @@ class SimpleScheduleEntity(RestoreEntity, Entity):
     _attr_should_poll = False
     _attr_has_entity_name = False
 
-    def __init__(self, hass, schedule: Schedule) -> None:
-        self.hass = hass
+    def __init__(self, schedule: Schedule) -> None:
         self.schedule = schedule
-        self._attr_unique_id = f"{DOMAIN}_{schedule.id}"
+        # Stable store id — unique within the simple_schedule platform.
+        self._attr_unique_id = schedule.id
         self._attr_name = schedule.name
+        # Suggest the same object_id as before so existing entity_ids stick.
+        self.entity_id = f"{DOMAIN}.{schedule.slug()}"
         self._attr_is_on = False
         self._active_window: dict[str, Any] | None = None
         self._next_event: str | None = None
-
-    @property
-    def entity_id(self) -> str:
-        return f"{DOMAIN}.{self.schedule.slug()}"
 
     @property
     def state(self) -> str:
@@ -68,8 +67,12 @@ class SimpleScheduleEntity(RestoreEntity, Entity):
             ATTR_ENABLED: self.schedule.enabled,
             ATTR_WEEKDAYS: list(self.schedule.weekdays),
             ATTR_WINDOWS: [w.to_dict() for w in self.schedule.windows],
-            ATTR_DEFAULT_ON_START: steps_to_storage(self.schedule.default_on_start),
-            ATTR_DEFAULT_ON_END: steps_to_storage(self.schedule.default_on_end),
+            ATTR_DEFAULT_ON_START: [
+                step_to_storage(a) for a in (self.schedule.default_on_start or [])
+            ],
+            ATTR_DEFAULT_ON_END: [
+                step_to_storage(a) for a in (self.schedule.default_on_end or [])
+            ],
             ATTR_GROUP_ID: self.schedule.group_id,
             ATTR_DATE_RANGE: (
                 self.schedule.date_range.to_dict() if self.schedule.date_range else None
@@ -81,18 +84,20 @@ class SimpleScheduleEntity(RestoreEntity, Entity):
         }
 
     @callback
-    def apply_schedule(self, schedule: Schedule) -> None:
+    def apply_schedule(self, schedule: Schedule, *, write_state: bool = True) -> None:
         self.schedule = schedule
         self._attr_name = schedule.name
-        self.async_write_ha_state()
+        if write_state and self.hass is not None:
+            self.async_write_ha_state()
 
     @callback
     def reevaluate(self) -> bool:
         """Recompute active state. Returns True if state flipped."""
         previous = self._attr_is_on
-        interval = active_interval(self.hass, self.schedule)
-        self._attr_is_on = interval is not None
-        if interval:
+        intervals = active_intervals(self.hass, self.schedule)
+        self._attr_is_on = bool(intervals)
+        if intervals:
+            interval = intervals[0]
             self._active_window = {
                 "id": interval.window_id,
                 "from": interval.start.isoformat(),
@@ -103,7 +108,8 @@ class SimpleScheduleEntity(RestoreEntity, Entity):
             self._active_window = None
         nxt = next_transition(self.hass, self.schedule)
         self._next_event = nxt[0].isoformat() if nxt else None
-        self.async_write_ha_state()
+        if self.hass is not None:
+            self.async_write_ha_state()
         return previous != self._attr_is_on
 
 
@@ -113,16 +119,12 @@ class SimpleScheduleGroupEntity(Entity):
     _attr_should_poll = False
     _attr_has_entity_name = False
 
-    def __init__(self, hass, group: ScheduleGroup, store) -> None:
-        self.hass = hass
+    def __init__(self, group: ScheduleGroup, store) -> None:
         self.group = group
         self.store = store
-        self._attr_unique_id = f"{DOMAIN}_group_{group.id}"
+        self._attr_unique_id = group.id
         self._attr_name = group.name
-
-    @property
-    def entity_id(self) -> str:
-        return f"{DOMAIN}.group_{self.group.slug()}"
+        self.entity_id = f"{DOMAIN}.group_{group.slug()}"
 
     @property
     def state(self) -> str:
@@ -136,13 +138,11 @@ class SimpleScheduleGroupEntity(Entity):
     def extra_state_attributes(self) -> dict[str, Any]:
         members = []
         active_member = None
-        today = dt_util.now().date()
         for mid in self.group.member_ids:
             sched = self.store.get_schedule(mid)
             if not sched:
                 continue
-            # Always include every member (even when enabled=false / out of season)
-            # so group cards can still list windows under each schedule.
+            today = dt_util.now().date()
             members.append(
                 {
                     "id": sched.id,
@@ -154,7 +154,6 @@ class SimpleScheduleGroupEntity(Entity):
                     "date_range": (
                         sched.date_range.to_dict() if sched.date_range else None
                     ),
-                    "windows": [w.to_dict() for w in sched.windows],
                     "windows_summary": ", ".join(w.summary_label() for w in sched.windows)
                     or "No windows set",
                 }
@@ -179,4 +178,5 @@ class SimpleScheduleGroupEntity(Entity):
     def apply_group(self, group: ScheduleGroup) -> None:
         self.group = group
         self._attr_name = group.name
-        self.async_write_ha_state()
+        if self.hass is not None:
+            self.async_write_ha_state()

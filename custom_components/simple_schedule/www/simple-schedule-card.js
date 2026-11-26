@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125z schedule-overlap warning copy */
+/* CACHEBUST:20261125z schedule-overlap warn + require_fallback Edit toggle */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -5255,6 +5255,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         _seasonErrorMemberId: { type: String },
         _memberRenameError: { type: String },
         _groupRenameError: { type: String },
+        _groupPatchError: { type: String },
         _memberSeasonOverride: {},
       };
     }
@@ -5673,6 +5674,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         rawEnabled && rawEnabled !== "none" ? rawEnabled : null;
       const requireFallback = a.require_fallback !== false;
       const dontRequire = !requireFallback;
+      const fallbackId = a.fallback_member;
 
       return html`
         <ha-card>
@@ -6151,8 +6153,9 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                                   </div>
                                 `
                               : html`<div class="muted" style="margin-top:8px">
-                                  First schedule in the group becomes the
-                                  default (no season dates).
+                                  ${dontRequire
+                                    ? "First schedule starts with no default required."
+                                    : "First schedule in the group becomes the default (no season dates)."}
                                 </div>`}
                             <div class="add-actions">
                               <button
@@ -6190,6 +6193,70 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                               Add a new schedule window
                             </button>
                           `}
+                    </div>
+                    <div
+                      class="add-new"
+                      style="margin-top:10px;padding-top:10px;border-top:1px solid var(--divider-color)"
+                    >
+                      ${requireFallback
+                        ? html`
+                            <div class="muted" style="font-weight:600">
+                              Default schedule
+                            </div>
+                            <div class="muted">
+                              Used when no seasonal member matches today’s date.
+                            </div>
+                            <div
+                              class="row"
+                              style="margin-top:6px;flex-wrap:wrap;gap:6px"
+                            >
+                              ${members.map(
+                                (m) => html`<button
+                                  type="button"
+                                  class="linkish ${fallbackId === m.id
+                                    ? "on"
+                                    : ""}"
+                                  style="padding:4px 8px;border-radius:6px;border:1px solid var(--divider-color);background:${fallbackId ===
+                                  m.id
+                                    ? "var(--primary-color)"
+                                    : "var(--card-background-color)"};color:${fallbackId ===
+                                  m.id
+                                    ? "var(--text-primary-color, #fff)"
+                                    : "var(--primary-text-color)"};cursor:pointer"
+                                  @click=${() =>
+                                    this._patchGroup({
+                                      require_fallback: true,
+                                      fallback_member_id: m.id,
+                                    })}
+                                >
+                                  ${m.name}
+                                </button>`
+                              )}
+                            </div>
+                          `
+                        : ""}
+                      <div
+                        class="row"
+                        style="margin-top:14px;align-items:center;gap:10px"
+                      >
+                        <span style="flex:1;min-width:0"
+                          >Don't require a default schedule window</span
+                        >
+                        <ha-switch
+                          .checked=${dontRequire}
+                          @change=${(e) =>
+                            this._setDontRequireDefault(
+                              Boolean(
+                                (e.currentTarget || e.target)?.checked
+                              )
+                            )}
+                        ></ha-switch>
+                      </div>
+                      ${this._groupPatchError
+                        ? html`<div class="error" style="margin-top:8px">
+                            ${this._groupPatchError}
+                          </div>`
+                        : ""}
                     </div>
                     <button
                       type="button"
@@ -6344,8 +6411,60 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       this._addMemberError = null;
     }
 
+    async _patchGroup(patch) {
+      this._groupPatchError = null;
+      const a = this._state?.attributes || {};
+      const requireFallback =
+        patch.require_fallback !== undefined
+          ? Boolean(patch.require_fallback)
+          : a.require_fallback !== false;
+      const fallback =
+        patch.fallback_member_id !== undefined
+          ? patch.fallback_member_id
+          : a.fallback_member;
+      if (requireFallback && !fallback) {
+        this._groupPatchError =
+          "Pick a default schedule, or turn on “Don’t require a default schedule window”.";
+        return false;
+      }
+      const gid = this._groupId;
+      if (!gid) return false;
+      return await this._ssCall("update_group", {
+        group_id: gid,
+        ...patch,
+      });
+    }
+
+    async _setDontRequireDefault(on) {
+      if (on) {
+        await this._patchGroup({
+          require_fallback: false,
+          fallback_member_id: null,
+        });
+      } else {
+        const a = this._state?.attributes || {};
+        const members = a.members || [];
+        const keep =
+          a.fallback_member ||
+          members.find((m) => !m.date_range)?.id ||
+          members[0]?.id ||
+          null;
+        if (!keep) {
+          this._groupPatchError =
+            "Add a member before requiring a default schedule.";
+          return;
+        }
+        await this._patchGroup({
+          require_fallback: true,
+          fallback_member_id: keep,
+        });
+      }
+    }
+
     _isDefaultMember(m, a, members) {
       const list = members || a?.members || [];
+      // When the group does not require a default, nothing is "the Default".
+      if (a?.require_fallback === false) return false;
       if (list.length === 1) return true;
       if (a?.fallback_member === m.id) return true;
       // Undated member is the seasonal fallback when no other window matches.
@@ -6377,6 +6496,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       if (gid) {
         await this._ssCall("update_group", {
           group_id: gid,
+          require_fallback: true,
           fallback_member_id: m.id,
         });
       }

@@ -8,7 +8,39 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import STORAGE_KEY, STORAGE_VERSION
-from .models import Schedule, ScheduleGroup, new_group, new_schedule, seasons_overlap
+from .models import (
+    Schedule,
+    ScheduleGroup,
+    migrate_store_data,
+    new_group,
+    new_schedule,
+    seasons_overlap,
+)
+
+
+class _MigratingStore(Store[dict[str, Any]]):
+    """Bump STORAGE_VERSION with in-store migration for legacy action strings."""
+
+    async def _async_migrate_func(
+        self,
+        old_major_version: int,
+        old_minor_version: int,
+        old_data: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        data = old_data or {}
+        if old_major_version < 2:
+            data = migrate_store_data(data)
+        elif old_major_version < 3:
+            # v3 adds optional window conditions; normalize via same migrator.
+            data = migrate_store_data(data)
+        elif old_major_version < 4:
+            # v4: singular on_start/on_end → ordered action lists.
+            data = migrate_store_data(data)
+        elif old_major_version < 5:
+            # v5: action lists may include wait steps; normalize via same migrator
+            # (preserves waits; does not rewrite v4 multi-actions).
+            data = migrate_store_data(data)
+        return data
 
 
 class SimpleScheduleStore:
@@ -16,12 +48,17 @@ class SimpleScheduleStore:
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
-        self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        self._store: Store[dict[str, Any]] = _MigratingStore(
+            hass, STORAGE_VERSION, STORAGE_KEY
+        )
         self.schedules: dict[str, Schedule] = {}
         self.groups: dict[str, ScheduleGroup] = {}
 
     async def async_load(self) -> None:
         data = await self._store.async_load() or {}
+        # Belt-and-suspenders: also migrate if Store returned v1-shaped strings
+        # (e.g. version already written as 2 without migrate, or tests).
+        data = migrate_store_data(data)
         self.schedules = {
             item["id"]: Schedule.from_dict(item)
             for item in data.get("schedules", [])
@@ -89,23 +126,30 @@ class SimpleScheduleStore:
             group = self.groups[schedule.group_id]
             group.member_ids = [m for m in group.member_ids if m != schedule_id]
             if group.enabled_member_id == schedule_id:
+                # Fallback may be unset — clear selection rather than inventing one
                 group.enabled_member_id = group.fallback_member_id
                 group.sticky = False
             if group.fallback_member_id == schedule_id:
-                group.fallback_member_id = group.member_ids[0] if group.member_ids else None
+                group.fallback_member_id = None
         for group in self.groups.values():
             if schedule_id in group.member_ids:
                 group.member_ids = [m for m in group.member_ids if m != schedule_id]
         await self.async_save()
 
     async def upsert_group(self, group: ScheduleGroup) -> ScheduleGroup:
-        # Validate season overlaps among members
+        # Schedule windows (member date ranges) must not overlap.
+        # Default/fallback is the catch-all and is exempt.
         members = [self.schedules[mid] for mid in group.member_ids if mid in self.schedules]
+        fallback_id = group.fallback_member_id
         for i, a in enumerate(members):
+            if a.id == fallback_id:
+                continue
             for b in members[i + 1 :]:
+                if b.id == fallback_id:
+                    continue
                 if seasons_overlap(a.date_range, b.date_range):
                     raise ValueError(
-                        f"Overlapping seasons between '{a.name}' and '{b.name}'"
+                        f"Overlapping schedule windows between '{a.name}' and '{b.name}'"
                     )
         self.groups[group.id] = group
         for mid in group.member_ids:
@@ -123,31 +167,52 @@ class SimpleScheduleStore:
         await self.async_save()
 
     def _validate_group_member_seasons(self, schedule: Schedule) -> None:
+        """Reject overlapping schedule windows; fallback/default member is exempt."""
         if not schedule.group_id or schedule.group_id not in self.groups:
+            return
+        group = self.groups[schedule.group_id]
+        fallback_id = group.fallback_member_id
+        if schedule.id == fallback_id:
             return
         for other in self.schedules_in_group(schedule.group_id):
             if other.id == schedule.id:
                 continue
+            if other.id == fallback_id:
+                continue
             if seasons_overlap(schedule.date_range, other.date_range):
                 raise ValueError(
-                    f"Overlapping seasons between '{schedule.name}' and '{other.name}'"
+                    f"Overlapping schedule windows between '{schedule.name}' and '{other.name}'"
                 )
 
     async def ensure_sample_data(self) -> list[str]:
-        """Create a small sample if store is empty. Returns created schedule ids."""
+        """Create a small sample if store is empty. Returns created schedule ids.
+
+        Sample actions use the Actions-style shape. Classroom starts **disabled**
+        so example scene entities are never fired unexpectedly on first install.
+        """
         if self.schedules:
             return []
 
         classroom = new_schedule(
             name="Sample classroom hours",
             object_id="sample_classroom_hours",
-            enabled=True,
+            enabled=False,
             weekdays=["mon", "tue", "wed", "thu", "fri"],
             windows=[
                 {
                     "id": "w_morning",
                     "from": {"kind": "clock", "time": "07:00"},
                     "to": {"kind": "clock", "time": "09:00"},
+                    "on_start": {
+                        "service": "scene.turn_on",
+                        "target": {"entity_id": ["scene.example_morning"]},
+                        "data": {},
+                    },
+                    "on_end": {
+                        "service": "scene.turn_on",
+                        "target": {"entity_id": ["scene.example_daytime"]},
+                        "data": {},
+                    },
                 },
                 {
                     "id": "w_afternoon",

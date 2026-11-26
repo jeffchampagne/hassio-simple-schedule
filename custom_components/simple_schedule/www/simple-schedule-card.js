@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125ad require-default button + Default chip tooltip */
+/* CACHEBUST:20261125ae optional entity editor + group visual editor */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -5279,12 +5279,9 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       return document.createElement("simple-schedule-card-editor");
     }
 
-    static getStubConfig(hass) {
-      const entity =
-        Object.keys(hass.states).find((e) =>
-          e.startsWith("simple_schedule.") && !e.includes(".group_")
-        ) || "simple_schedule.sample_classroom_hours";
-      return { type: "custom:simple-schedule-card", entity, time_format: "12" };
+    static getStubConfig() {
+      // Leave entity blank so Add Card shows the create-schedule flow.
+      return { type: "custom:simple-schedule-card", time_format: "12" };
     }
   }
 
@@ -5338,6 +5335,9 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         _groupRenameError: { type: String },
         _groupPatchError: { type: String },
         _memberSeasonOverride: {},
+        _createName: { type: String },
+        _createError: { type: String },
+        _createBusy: { type: Boolean },
       };
     }
 
@@ -5391,6 +5391,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       } catch (err) {
         const msg = sscUserError(err, opts?.ctx);
         if (opts?.inline === "add") this._addMemberError = msg;
+        else if (opts?.inline === "create") this._createError = msg;
         else if (opts?.inline === "season") {
           this._seasonError = msg;
           this._seasonErrorMemberId = opts?.memberId || null;
@@ -5408,8 +5409,9 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
     }
 
     setConfig(config) {
-      if (!config?.entity) throw new Error("entity is required");
-      this._config = config;
+      // entity is optional — blank card shows create-group empty state.
+      const cfg = config || {};
+      this._config = cfg;
       this._expandedId = null;
       this._memberEditors = {};
       this._renaming = false;
@@ -5425,14 +5427,184 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       this._newMemberYearly = true;
       this._addMemberError = null;
       this._pendingExpandName = null;
+      this._createName = this._createName || "";
+      this._createError = null;
+      this._createBusy = false;
     }
 
     getCardSize() {
-      return 6;
+      return this._config?.entity ? 6 : 4;
+    }
+
+    static getConfigElement() {
+      return document.createElement("simple-schedule-card-editor");
+    }
+
+    static getStubConfig() {
+      // Leave entity blank so Add Card shows the create-group flow.
+      return { type: "custom:simple-schedule-group-card", time_format: "12" };
     }
 
     get _state() {
-      return this.hass?.states?.[this._config.entity];
+      const eid = this._config?.entity;
+      if (!eid) return null;
+      return this.hass?.states?.[eid];
+    }
+
+    _slugifyName(name) {
+      return String(name || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 64) || "schedule_group";
+    }
+
+    async _waitForEntity(entityId, timeoutMs = 8000) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (this.hass?.states?.[entityId]) return true;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      return Boolean(this.hass?.states?.[entityId]);
+    }
+
+    async _persistLovelaceCardConfig(prevConfig, nextConfig) {
+      this.dispatchEvent(
+        new CustomEvent("config-changed", {
+          detail: { config: nextConfig },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      const lovelace =
+        this.hass?.connection &&
+        (this._getLovelace?.() ||
+          (() => {
+            let el = this;
+            while (el) {
+              if (el.lovelace) return el.lovelace;
+              el = el.parentElement || el.getRootNode?.()?.host;
+            }
+            return null;
+          })());
+      // Prefer parent solo helper when available; otherwise config-changed is enough.
+      if (!lovelace || typeof lovelace.saveConfig !== "function") return false;
+      if (lovelace.mode === "yaml") return false;
+      try {
+        const liveRoot = lovelace.rawConfig || lovelace.config;
+        if (!liveRoot) return false;
+        const clone = JSON.parse(JSON.stringify(liveRoot));
+        // Replace first blank group card, else first matching config object.
+        let replaced = false;
+        const walk = (node, parent, key) => {
+          if (replaced) return;
+          if (Array.isArray(node)) {
+            node.forEach((child, i) => walk(child, node, i));
+            return;
+          }
+          if (!node || typeof node !== "object") return;
+          const t = String(node.type || "");
+          const isGroup =
+            t === "custom:simple-schedule-group-card" ||
+            t === "simple-schedule-group-card";
+          if (isGroup && !node.entity && parent != null) {
+            parent[key] = { ...node, ...nextConfig };
+            replaced = true;
+            return;
+          }
+          for (const k of Object.keys(node)) walk(node[k], node, k);
+        };
+        walk(clone, null, null);
+        if (replaced) {
+          await lovelace.saveConfig(clone);
+          return true;
+        }
+      } catch (err) {
+        console.warn("simple-schedule-group-card: Lovelace save failed", err);
+      }
+      return false;
+    }
+
+    async _bindGroupEntity(entityId) {
+      const prevConfig = this._config || {};
+      const next = {
+        ...prevConfig,
+        type: "custom:simple-schedule-group-card",
+        entity: entityId,
+        time_format: prevConfig.time_format || "12",
+      };
+      const saved = await this._persistLovelaceCardConfig(prevConfig, next);
+      this._config = next;
+      if (!saved) {
+        console.warn(
+          "simple-schedule-group-card: bound entity in-session only; Lovelace config may need a save."
+        );
+      }
+      this.requestUpdate();
+    }
+
+    async _createGroupFromBlank() {
+      const name = String(this._createName || "").trim();
+      this._createError = null;
+      if (!name) {
+        this._createError = "Enter a name for the new schedule group.";
+        return;
+      }
+      this._createBusy = true;
+      try {
+        const slug = this._slugifyName(name);
+        const ok = await this._ssCall(
+          "create_group",
+          { name, object_id: slug },
+          { inline: "create", ctx: { create: true } }
+        );
+        if (!ok) return;
+        const entityId = `simple_schedule.group_${slug}`;
+        await this._waitForEntity(entityId);
+        this._createName = "";
+        await this._bindGroupEntity(entityId);
+      } finally {
+        this._createBusy = false;
+      }
+    }
+
+    _renderBlankGroupCreate() {
+      return html`
+        <ha-card>
+          <div class="body blank-create">
+            <h2>New Schedule Group</h2>
+            <div class="hint">
+              Create a group of schedules where only one is active at a time
+              (for example Normal, Halloween, and Christmas).
+            </div>
+            <div class="date-row name-row">
+              <span class="muted">Name</span>
+              <input
+                type="text"
+                .value=${this._createName || ""}
+                placeholder="e.g. Outdoor Lights"
+                ?disabled=${this._createBusy}
+                @input=${(e) => {
+                  this._createName = e.target.value;
+                  this._createError = null;
+                }}
+                @keydown=${(e) => {
+                  if (e.key === "Enter") this._createGroupFromBlank();
+                }}
+              />
+            </div>
+            ${sscChip(html, this._createError, "critical")}
+            <button
+              type="button"
+              class="add-new-bar"
+              ?disabled=${this._createBusy}
+              @click=${() => this._createGroupFromBlank()}
+            >
+              ${this._createBusy ? "Creating…" : "Create schedule group"}
+            </button>
+          </div>
+        </ha-card>
+      `;
     }
 
     get _groupId() {
@@ -5741,6 +5913,9 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
     }
 
     render() {
+      if (!this._config?.entity) {
+        return this._renderBlankGroupCreate();
+      }
       const st = this._state;
       if (!st) {
         return html`<ha-card
@@ -6701,14 +6876,6 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         }
       }
     }
-
-    static getStubConfig(hass) {
-      const entity =
-        Object.keys(hass.states).find((e) =>
-          e.startsWith("simple_schedule.group_")
-        ) || "simple_schedule.group_sample_outdoor_lighting";
-      return { type: "custom:simple-schedule-group-card", entity };
-    }
   }
 
   class SimpleScheduleCardEditor extends LitElement {
@@ -6775,23 +6942,27 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
     render() {
       if (!this._config) return html``;
       const fmt = this._fmt;
+      const isGroup = this._isGroupCard;
+      const entityLabel = isGroup
+        ? "Existing group (optional)"
+        : "Existing schedule (optional)";
+      const hint = isGroup
+        ? "Leave blank to create a new schedule group on the card. Pick a group entity only if you want to show one that already exists."
+        : "Leave blank to create a new schedule on the card. Pick an entity only if you want to show one that already exists.";
       return html`
         <div class="wrap">
           <div>
-            <div class="label">Entity</div>
+            <div class="label">${entityLabel}</div>
             <ha-entity-picker
               .hass=${this.hass}
               .value=${this._config.entity || ""}
               .includeDomains=${["simple_schedule"]}
-              .label=${"Entity"}
+              .label=${entityLabel}
+              .placeholder=${"Optional — leave blank for new"}
               allow-custom-entity
               @value-changed=${this._entityChanged}
             ></ha-entity-picker>
-            <div class="hint">
-              ${this._isGroupCard
-                ? "Pick a simple_schedule group entity."
-                : "Pick a simple_schedule entity."}
-            </div>
+            <div class="hint">${hint}</div>
           </div>
           <div>
             <div class="label">Time format</div>
@@ -6818,12 +6989,15 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
 
     _entityChanged(ev) {
       const value = ev.detail?.value ?? "";
+      // Blank is intentional for the create-new flow — do not treat as required.
       this._update({ entity: value || undefined });
     }
 
     _update(patch) {
       // Preserve YAML-only keys (e.g. schedule_id) — not shown in UI
-      this._config = { ...this._config, ...patch };
+      const next = { ...this._config, ...patch };
+      if (!next.entity) delete next.entity;
+      this._config = next;
       this.dispatchEvent(
         new CustomEvent("config-changed", {
           detail: { config: this._config },

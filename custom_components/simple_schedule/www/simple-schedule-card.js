@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125ac require_fallback button matches add-new-bar */
+/* CACHEBUST:20261125ad require_fallback button labels + tooltips */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -2734,20 +2734,17 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
           border-color: var(--ssc-accent, #5b7c8a);
           background: var(--ssc-on-bg, rgba(91, 124, 138, 0.14));
         }
-        /* Pressed/ON for toggles that reuse add-new-bar (e.g. don't-require-default). */
+        /* Pressed/ON for toggles that reuse add-new-bar (don't-require-default). */
         button.add-new-bar.on {
           border-style: solid;
           border-color: var(--primary-color);
-          color: var(--primary-color);
-          background: var(--secondary-background-color);
+          color: var(--text-primary-color, #fff);
+          background: var(--primary-color);
         }
         button.add-new-bar.on:hover {
           border-color: var(--primary-color);
-          background: color-mix(
-            in srgb,
-            var(--primary-color) 12%,
-            var(--secondary-background-color)
-          );
+          background: color-mix(in srgb, var(--primary-color) 88%, #000);
+          color: var(--text-primary-color, #fff);
         }
         .blank-create {
           display: flex;
@@ -6322,11 +6319,15 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                         type="button"
                         class="add-new-bar ${dontRequire ? "on" : ""}"
                         aria-pressed=${dontRequire ? "true" : "false"}
+                        title=${dontRequire
+                          ? "Click to require a default schedule window for this group. Default windows apply when no other schedule is active."
+                          : "Click to not require a default schedule window for this group. This will allow periods where no schedule is active for this group."}
                         @click=${() =>
                           this._setDontRequireDefault(!dontRequire)}
                       >
-                        ${dontRequire ? "✓ " : ""}Don't require a default
-                        schedule window
+                        ${dontRequire
+                          ? "Require a default schedule window"
+                          : "Don't require a default schedule window"}
                       </button>
                       ${this._groupPatchError
                         ? html`<div class="error" style="margin-top:8px">

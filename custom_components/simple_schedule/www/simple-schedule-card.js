@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125aa require_fallback Edit toggle as pressed button */
+/* CACHEBUST:20261125ab restore step helpers (Edit expand) + overnight legend copy */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -319,13 +319,73 @@
     return { service: String(service), target, data };
   }
 
-  function sscNormalizeActionList(raw) {
+  function sscNormalizeWaitStep(raw) {
+    if (raw == null || typeof raw !== "object") return null;
+    const t = raw.type;
+    const looksWait =
+      t === "wait" ||
+      ((t == null || t === "") &&
+        ("seconds" in raw || "minutes" in raw) &&
+        !raw.service &&
+        !raw.action);
+    if (!looksWait) return null;
+    const secs =
+      Math.max(0, Number(raw.seconds) || 0) +
+      Math.max(0, Number(raw.minutes) || 0) * 60;
+    return { type: "wait", seconds: secs | 0 };
+  }
+
+  function sscNormalizeStep(raw) {
+    if (raw == null || raw === "" || raw === false) return null;
+    const wait = sscNormalizeWaitStep(raw);
+    if (wait) return wait;
+    // type:"action" wrapper → strip before WindowAction normalize
+    let payload = raw;
+    if (typeof raw === "object" && raw.type === "action") {
+      const { type, ...rest } = raw;
+      payload = rest;
+    }
+    const action = sscNormalizeAction(payload);
+    return action ? { type: "action", ...action } : null;
+  }
+
+  function sscNormalizeStepList(raw) {
     if (raw == null || raw === "" || raw === false) return [];
     if (Array.isArray(raw)) {
-      return raw.map(sscNormalizeAction).filter(Boolean);
+      return raw.map(sscNormalizeStep).filter(Boolean);
     }
-    const one = sscNormalizeAction(raw);
+    const one = sscNormalizeStep(raw);
     return one ? [one] : [];
+  }
+
+  /** Persist shape: waits keep type; actions stay {service,target,data} (v4-compatible). */
+  function sscStepsToStorage(steps) {
+    return (steps || [])
+      .map((s) => {
+        const step = sscNormalizeStep(s);
+        if (!step) return null;
+        if (step.type === "wait") return { type: "wait", seconds: step.seconds | 0 };
+        return {
+          service: step.service,
+          target: { ...(step.target || {}) },
+          data: { ...(step.data || {}) },
+        };
+      })
+      .filter(Boolean);
+  }
+
+  // Back-compat alias used across the card — now preserves wait steps.
+  function sscNormalizeActionList(raw) {
+    return sscNormalizeStepList(raw);
+  }
+
+  function formatWait(seconds) {
+    const s = Math.max(0, Number(seconds) || 0);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    if (m && r) return `${m}m ${r}s`;
+    if (m) return `${m}m`;
+    return `${r}s`;
   }
 
   function sscActionChipLabel(hass, action, index) {
@@ -3240,17 +3300,17 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       if (Array.isArray(next.windows)) {
         next.windows = next.windows.map((w) => ({
           ...w,
-          on_start: sscNormalizeActionList(w.on_start),
-          on_end: sscNormalizeActionList(w.on_end),
+          on_start: sscStepsToStorage(w.on_start),
+          on_end: sscStepsToStorage(w.on_end),
           conditions: sscNormalizeConditions(w.conditions),
           condition_match: sscConditionMatchMode(w.condition_match),
         }));
       }
       if ("default_on_start" in next) {
-        next.default_on_start = sscNormalizeActionList(next.default_on_start);
+        next.default_on_start = sscStepsToStorage(next.default_on_start);
       }
       if ("default_on_end" in next) {
-        next.default_on_end = sscNormalizeActionList(next.default_on_end);
+        next.default_on_end = sscStepsToStorage(next.default_on_end);
       }
       return this._ssCall("update_schedule", {
         schedule_id: sid,
@@ -4139,7 +4199,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                       </div>
                       ${overnight
                         ? html`<div class="muted" style="font-size:0.7rem;margin-top:2px">
-                            ↺ overnight window (split bands) · DOW = start day
+                            This is an overnight schedule. All actions are based on the day the schedule starts.
                           </div>`
                         : ""}
                     </div>
@@ -4421,10 +4481,11 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
     }
 
     _beginActionEdit(windowId, field, index) {
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
       const existing = index == null ? null : list[index];
+      if (existing?.type === "wait") return;
       this._actionEditKey = this._actionEditKeyFor(
         windowId,
         field,
@@ -4454,14 +4515,18 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         this._errorLevel = "warning";
         return;
       }
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
-      const next = list.map((a) => ({
-        service: a.service,
-        target: { ...(a.target || {}) },
-        data: { ...(a.data || {}) },
-      }));
+      const next = list.map((s) =>
+        s.type === "wait"
+          ? { type: "wait", seconds: s.seconds | 0 }
+          : {
+              service: s.service,
+              target: { ...(s.target || {}) },
+              data: { ...(s.data || {}) },
+            }
+      );
       if (token === "new") next.push(draft);
       else {
         const idx = Number(token);
@@ -4470,23 +4535,23 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       }
       this._error = null;
       this._clearActionEdit();
-      this._patchWindow(windowId, { [field]: next });
+      this._patchWindow(windowId, { [field]: sscStepsToStorage(next) });
     }
 
     _removeActionAt(windowId, field, index) {
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
       const next = list.filter((_, i) => i !== index);
       if ((this._actionEditKey || "").startsWith(`${windowId}:${field}:`)) {
         this._clearActionEdit();
       }
-      this._patchWindow(windowId, { [field]: next });
+      this._patchWindow(windowId, { [field]: sscStepsToStorage(next) });
     }
 
     _reorderActions(windowId, field, fromIndex, toIndex) {
       if (fromIndex === toIndex || fromIndex == null || toIndex == null) return;
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
       if (
@@ -4496,17 +4561,21 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         toIndex >= list.length
       )
         return;
-      const next = list.map((a) => ({
-        service: a.service,
-        target: { ...(a.target || {}) },
-        data: { ...(a.data || {}) },
-      }));
+      const next = list.map((s) =>
+        s.type === "wait"
+          ? { type: "wait", seconds: s.seconds | 0 }
+          : {
+              service: s.service,
+              target: { ...(s.target || {}) },
+              data: { ...(s.data || {}) },
+            }
+      );
       const [item] = next.splice(fromIndex, 1);
       next.splice(toIndex, 0, item);
       if ((this._actionEditKey || "").startsWith(`${windowId}:${field}:`)) {
         this._clearActionEdit();
       }
-      this._patchWindow(windowId, { [field]: next });
+      this._patchWindow(windowId, { [field]: sscStepsToStorage(next) });
     }
 
     _renderActionPicker(w, field, label, hint) {

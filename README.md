@@ -33,9 +33,10 @@ entity: simple_schedule.group_sample_outdoor_lighting
 
 | Feature | Notes |
 |---|---|
-| Windows | Clock or sun (dawn/sunrise/dusk/sunset) ± offset |
-| On start / On end | At most one `scene.*` or `script.*` each |
+| Windows | Clock or sun (dawn/sunrise/dusk/sunset) ± offset; overlaps allowed (warn on save) |
+| At start / At end | Ordered steps: `scene.*` / `script.*` actions + duration waits (seconds) |
 | DOW | Sunday-first; overnight uses start day |
+| Solo date range | Optional; when set, schedule does not fire outside the range |
 | Groups | Exclusive enable + season dates + sticky click cycle |
 | Events | `simple_schedule_window_started` / `simple_schedule_window_ended` |
 

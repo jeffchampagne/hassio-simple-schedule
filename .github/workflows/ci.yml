@@ -27,3 +27,7 @@ jobs:
       - name: Card schedule Edit open/close + wait helpers
         run: |
           python -m unittest -v tests.simple_schedule.test_card_schedule_edit
+
+      - name: Card editor optional entity + group visual editor
+        run: |
+          python -m unittest -v tests.simple_schedule.test_card_editor_optional_entity

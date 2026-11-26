@@ -28,6 +28,15 @@ jobs:
         run: |
           python -m unittest -v tests.simple_schedule.test_runtime
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build minified Lovelace card
+        run: |
+          ./scripts/build-card.sh
+          git diff --exit-code -- custom_components/simple_schedule/www/simple-schedule-card.js
+
       - name: Card schedule Edit open/close + wait helpers
         run: |
           python -m unittest -v tests.simple_schedule.test_card_schedule_edit

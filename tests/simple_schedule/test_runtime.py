@@ -316,10 +316,166 @@ class CardServingTests(unittest.TestCase):
         card = SS.card_path()
         self.assertEqual(card, PKG / "www" / "simple-schedule-card.js")
         self.assertTrue(card.is_file())
+        self.assertTrue((PKG / "www" / "simple-schedule-card.src.js").is_file())
 
     def test_no_stray_card_copies(self):
         names = sorted(p.name for p in (PKG / "www").iterdir())
-        self.assertEqual(names, ["simple-schedule-card.js"])
+        self.assertEqual(
+            names, ["simple-schedule-card.js", "simple-schedule-card.src.js"]
+        )
+
+
+class TickIntervalTests(unittest.TestCase):
+    def test_interval_constant(self):
+        const = sys.modules["simple_schedule.const"]
+        self.assertEqual(const.TICK_INTERVAL_SECONDS, 60)
+        self.assertEqual(SS.TICK_INTERVAL_SECONDS, 60)
+
+    def test_async_start_uses_tick_interval(self):
+        hass, _store, runtime = _make_runtime()
+        captured: list = []
+
+        def fake_interval(_hass, action, interval):  # noqa: ANN001
+            captured.append(interval)
+            return lambda: None
+
+        async def main():
+            with (
+                mock.patch.object(SS, "async_track_time_interval", fake_interval),
+                mock.patch.object(SS, "async_track_state_change_event", lambda *a, **k: (lambda: None)),
+                mock.patch.object(runtime, "async_apply_season_auto_select", mock.AsyncMock()),
+                mock.patch.object(runtime, "async_tick", mock.AsyncMock()),
+                mock.patch.object(runtime, "_schedule_next_point"),
+            ):
+                await runtime.async_start()
+
+        asyncio.run(main())
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].total_seconds(), SS.TICK_INTERVAL_SECONDS)
+
+    def test_sun_listener_ticks_only_on_replan_attrs(self):
+        hass, _store, runtime = _make_runtime()
+        ticks: list[int] = []
+
+        class _State:
+            def __init__(self, attrs):  # noqa: ANN001
+                self.attributes = attrs
+
+        attrs = {k: None for k in SS.SUN_REPLAN_ATTRS}
+        attrs["next_setting"] = "2026-11-26T22:00:00+00:00"
+        states = {"sun.sun": _State(dict(attrs))}
+        hass.states = types.SimpleNamespace(get=lambda eid: states.get(eid))
+
+        listener = {"cb": None}
+
+        def fake_track(_hass, _ids, cb):  # noqa: ANN001
+            listener["cb"] = cb
+            return lambda: None
+
+        async def main():
+            with mock.patch.object(SS, "async_track_state_change_event", fake_track):
+                runtime._ensure_sun_listener()
+                self.assertIsNotNone(listener["cb"])
+
+                async def record_tick(_now=None):
+                    ticks.append(1)
+
+                runtime.async_tick = record_tick  # type: ignore[method-assign]
+                # Elevation-style churn: replan attrs unchanged.
+                states["sun.sun"] = _State({**attrs, "elevation": -12})
+                listener["cb"](None)
+                await asyncio.sleep(0)
+                self.assertEqual(ticks, [])
+                # next_setting change should replan.
+                attrs["next_setting"] = "2026-11-26T22:05:00+00:00"
+                states["sun.sun"] = _State(dict(attrs))
+                listener["cb"](None)
+                await asyncio.sleep(0)
+                self.assertEqual(ticks, [1])
+                await runtime.async_stop()
+
+        asyncio.run(main())
+
+
+class ReloadPublishTests(unittest.TestCase):
+    def test_reload_publish_false_skips_state_writes(self):
+        hass, store, runtime = _make_runtime()
+        schedule = models.new_schedule(
+            name="Porch",
+            windows=[
+                {
+                    "id": "w",
+                    "from": {"kind": "clock", "time": "18:00"},
+                    "to": {"kind": "clock", "time": "22:00"},
+                }
+            ],
+        )
+        store.schedules[schedule.id] = schedule
+        entity = entity_mod.SimpleScheduleEntity(schedule)
+        writes = {"n": 0}
+
+        def count_write():
+            writes["n"] += 1
+
+        entity.hass = hass
+        entity.async_write_ha_state = count_write
+        runtime.schedule_entities[schedule.id] = entity
+        schedule.name = "Porch Updated"
+
+        async def main():
+            await runtime.async_reload_entities(publish=False)
+            self.assertEqual(writes["n"], 0)
+            self.assertEqual(entity.schedule.name, "Porch Updated")
+            await runtime.async_reload_entities(publish=True)
+            # apply_schedule(write_state=True) once; no reevaluate write without intervals.
+            self.assertGreaterEqual(writes["n"], 1)
+
+        asyncio.run(main())
+
+    def test_exclusive_enable_single_publish_path(self):
+        """reload(publish=False)+tick should not write from apply_schedule."""
+        hass, store, runtime = _make_runtime()
+        windows = [
+            {
+                "id": "w",
+                "from": {"kind": "clock", "time": "18:00"},
+                "to": {"kind": "clock", "time": "22:00"},
+            }
+        ]
+        a = models.new_schedule(name="A", windows=windows, enabled=True)
+        b = models.new_schedule(name="B", windows=windows, enabled=False)
+        store.schedules[a.id] = a
+        store.schedules[b.id] = b
+        group = models.new_group(
+            name="G",
+            member_ids=[a.id, b.id],
+            fallback_member_id=a.id,
+            enabled_member_id=a.id,
+        )
+        store.groups[group.id] = group
+        a.group_id = group.id
+        b.group_id = group.id
+
+        apply_writes = {"n": 0}
+        orig_apply = entity_mod.SimpleScheduleEntity.apply_schedule
+
+        def counting_apply(self, schedule, *, write_state=True):  # noqa: ANN001
+            if write_state:
+                apply_writes["n"] += 1
+            return orig_apply(self, schedule, write_state=write_state)
+
+        async def main():
+            with mock.patch.object(
+                entity_mod.SimpleScheduleEntity, "apply_schedule", counting_apply
+            ):
+                await runtime.async_reload_entities()
+                apply_writes["n"] = 0
+                await runtime._exclusive_enable(group.id, b.id, sticky=True)
+                # publish=False on reload means apply_schedule never write_state=True
+                # during exclusive_enable (tick uses reevaluate instead).
+                self.assertEqual(apply_writes["n"], 0)
+
+        asyncio.run(main())
 
 
 if __name__ == "__main__":

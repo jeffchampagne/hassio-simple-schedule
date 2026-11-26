@@ -178,8 +178,8 @@ class SimpleScheduleGroupEntity(Entity):
         }
 
     @callback
-    def apply_group(self, group: ScheduleGroup) -> None:
+    def apply_group(self, group: ScheduleGroup, *, write_state: bool = True) -> None:
         self.group = group
         self._attr_name = group.name
-        if self.hass is not None:
+        if write_state and self.hass is not None:
             self.async_write_ha_state()

@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125y schedule-window block + sun-aware schedule overlap #C9A227 + labels */
+/* CACHEBUST:20261125z schedule-overlap warning copy */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -3967,7 +3967,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         this._attrs?.weekdays
       );
       if (!ids.size) return null;
-      return "Overlapping schedules — allowed, but they share hours. Indoor/outdoor usually stay on separate schedules.";
+      return "Warning: You have schedules with times that overlap. This is allowed but is something you should confirm you want.";
     }
 
     _overlappingIds() {

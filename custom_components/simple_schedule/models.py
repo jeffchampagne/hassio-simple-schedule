@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, time, timedelta
+from dataclasses import dataclass, field
+from datetime import date, time, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -17,7 +16,6 @@ from .const import (
     LEGACY_ACTION_DOMAINS,
     STEP_TYPE_ACTION,
     STEP_TYPE_WAIT,
-    STEP_TYPES,
     SUN_KINDS,
     WEEKDAYS,
 )
@@ -135,10 +133,6 @@ class WindowAction:
             target=target,
             data=dict(raw_data),
         )
-
-
-def _validate_action(raw: Any) -> WindowAction | None:
-    return WindowAction.from_dict(raw)
 
 
 @dataclass
@@ -639,7 +633,7 @@ class ScheduleGroup:
     fallback_member_id: str | None = None
     enabled_member_id: str | None = None
     sticky: bool = False
-    # HSCP-42: when False, fallback may be null; auto-select may leave none enabled
+    # When False, fallback may be null; auto-select may leave none enabled
     require_fallback: bool = True
     object_id: str | None = None
 
@@ -658,7 +652,7 @@ class ScheduleGroup:
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> ScheduleGroup:
-        # Default True preserves pre-HSCP-42 behavior when field absent
+        # Default True preserves older stores that predate the field
         require_fallback = data.get("require_fallback")
         if require_fallback is None:
             require_fallback = True
@@ -684,7 +678,7 @@ class ScheduleGroup:
 
 
 def seasons_overlap(a: DateRange | None, b: DateRange | None, year: int | None = None) -> bool:
-    """Reject overlapping season ranges (Jeff #8). Heuristic check across a year."""
+    """Reject overlapping season ranges. Heuristic check across a year."""
     if a is None or b is None:
         return False
     y = year or date.today().year
@@ -732,7 +726,3 @@ def new_schedule(**kwargs: Any) -> Schedule:
 def new_group(**kwargs: Any) -> ScheduleGroup:
     data = {"id": _new_id("g"), "name": "New group", **kwargs}
     return ScheduleGroup.from_dict(data)
-
-
-def clone_dict(obj: Any) -> Any:
-    return deepcopy(asdict(obj) if hasattr(obj, "__dataclass_fields__") else obj)

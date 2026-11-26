@@ -126,7 +126,7 @@ class SimpleScheduleStore:
             group = self.groups[schedule.group_id]
             group.member_ids = [m for m in group.member_ids if m != schedule_id]
             if group.enabled_member_id == schedule_id:
-                # HSCP-42: may omit fallback — clear selection rather than inventing one
+                # Fallback may be unset — clear selection rather than inventing one
                 group.enabled_member_id = group.fallback_member_id
                 group.sticky = False
             if group.fallback_member_id == schedule_id:
@@ -185,10 +185,10 @@ class SimpleScheduleStore:
                 )
 
     async def ensure_sample_data(self) -> list[str]:
-        """Create a small pilot sample if store is empty. Returns created schedule ids.
+        """Create a small sample if store is empty. Returns created schedule ids.
 
         Sample actions use the Actions-style shape. Classroom starts **disabled**
-        so production scene entities are never fired unexpectedly on first install.
+        so example scene entities are never fired unexpectedly on first install.
         """
         if self.schedules:
             return []
@@ -205,12 +205,12 @@ class SimpleScheduleStore:
                     "to": {"kind": "clock", "time": "09:00"},
                     "on_start": {
                         "service": "scene.turn_on",
-                        "target": {"entity_id": ["scene.main_floor_dinner"]},
+                        "target": {"entity_id": ["scene.example_morning"]},
                         "data": {},
                     },
                     "on_end": {
                         "service": "scene.turn_on",
-                        "target": {"entity_id": ["scene.main_floor_after_dinner"]},
+                        "target": {"entity_id": ["scene.example_daytime"]},
                         "data": {},
                     },
                 },

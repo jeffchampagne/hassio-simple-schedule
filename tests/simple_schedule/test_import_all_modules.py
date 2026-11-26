@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Import every companion Python module (stubs for HA deps).
 
-Catches missing symbols (e.g. ScheduleStep) before a tip is folded onto live HA.
+Catches missing symbols (e.g. ScheduleStep) before they reach a Home Assistant install.
 """
 
 from __future__ import annotations
@@ -68,16 +68,16 @@ class ImportAllModulesTests(unittest.TestCase):
         models = self.loaded["models.py"]
         self.assertTrue(
             hasattr(models, "ScheduleStep"),
-            "models.py must export ScheduleStep (live PHL evaluator imports it)",
+            "models.py must export ScheduleStep (evaluator imports it)",
         )
-        # Live shape: union of WindowAction | WaitStep (not an ActionStep alias)
+        # Union of WindowAction | WaitStep (not an ActionStep alias)
         self.assertTrue(hasattr(models, "WindowAction"))
         self.assertTrue(hasattr(models, "WaitStep"))
         self.assertFalse(
             hasattr(models, "ActionStep"),
-            "ActionStep must not exist — live uses ScheduleStep/WindowAction/WaitStep",
+            "ActionStep must not exist — use ScheduleStep/WindowAction/WaitStep",
         )
-        # Live defines ScheduleStep = WindowAction | WaitStep (typing.Union / | )
+        # ScheduleStep = WindowAction | WaitStep (typing.Union / | )
         self.assertEqual(
             models.ScheduleStep,
             models.WindowAction | models.WaitStep,

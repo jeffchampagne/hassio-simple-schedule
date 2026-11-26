@@ -6,7 +6,6 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import voluptuous as vol
 
@@ -124,6 +123,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+def card_path() -> Path:
+    """Lovelace card bundle served at CARD_URL_PATH."""
+    return Path(__file__).parent / "www" / "simple-schedule-card.js"
+
+
 class SimpleScheduleRuntime:
     """Owns entities, evaluation loop, groups, and services."""
 
@@ -144,6 +148,8 @@ class SimpleScheduleRuntime:
         self._unsub_point = None
         self._unsub_conditions = None
         self._prev_active: dict[str, set[str]] = {}  # schedule_id -> active window ids
+        # schedule_id -> latest queued action sequence (runs serialize per schedule)
+        self._action_tasks: dict[str, asyncio.Task] = {}
 
     async def async_setup(self) -> None:
         await self.async_reload_entities()
@@ -218,36 +224,9 @@ class SimpleScheduleRuntime:
                 entity.async_write_ha_state()
 
     async def async_register_static_paths(self) -> None:
-        # Prefer versioned card builds when present. Tracked
-        # simple-schedule-card.js is frequently restored by HA VCS sync;
-        # versioned artifacts are untracked and stay deployed.
-        www = Path(__file__).parent / "www"
-        card = www / "simple-schedule-card-20261125q.js"
+        card = card_path()
         if not card.exists():
-            card = www / "simple-schedule-card-20261125p.js"
-        if not card.exists():
-            card = www / "simple-schedule-card-20261125o.js"
-        if not card.exists():
-            card = www / "simple-schedule-card-20261125n.js"
-        if not card.exists():
-            card = www / "simple-schedule-card-20261125m.js"
-        if not card.exists():
-            card = www / "simple-schedule-card-20261125l.js"
-        if not card.exists():
-            card = www / "simple-schedule-card-20261125k.js"
-        if not card.exists():
-            card = www / "simple-schedule-card-20261125j.js"
-        if not card.exists():
-            card = www / "simple-schedule-card-20261125i.js"
-        if not card.exists():
-            card = www / "simple-schedule-card-20261125h.js"
-        if not card.exists():
-            card = www / "simple-schedule-card-20261125g.js"
-        if not card.exists():
-            card = www / "simple-schedule-card-20261125f.js"
-        if not card.exists():
-            card = www / "simple-schedule-card.js"
-        if not card.exists():
+            www = card.parent
             _LOGGER.warning("Card file missing under %s", www)
             return
         try:
@@ -284,6 +263,10 @@ class SimpleScheduleRuntime:
         if self._unsub_conditions:
             self._unsub_conditions()
             self._unsub_conditions = None
+        for task in self._action_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._action_tasks.clear()
         for sid in list(self.schedule_entities):
             entity = self.schedule_entities.pop(sid)
             await self.component.async_remove_entity(entity.entity_id)
@@ -297,9 +280,15 @@ class SimpleScheduleRuntime:
             self._unsub_point = None
         soonest: datetime | None = None
         for schedule in self.store.schedules.values():
-            nxt = next_transition(self.hass, schedule)
-            if nxt and (soonest is None or nxt[0] < soonest):
-                soonest = nxt[0]
+            entity = self.schedule_entities.get(schedule.id)
+            if entity is not None and entity.schedule is schedule:
+                # Computed by entity.reevaluate() in the same tick.
+                nxt_at = entity.next_transition_at
+            else:
+                nxt = next_transition(self.hass, schedule)
+                nxt_at = nxt[0] if nxt else None
+            if nxt_at and (soonest is None or nxt_at < soonest):
+                soonest = nxt_at
         # Also midnight for season re-apply
         now = dt_util.now()
         midnight = (now + timedelta(days=1)).replace(
@@ -311,9 +300,10 @@ class SimpleScheduleRuntime:
 
             @callback
             def _fire(_now):
+                self._unsub_point = None
+                # async_tick reschedules the next point when it finishes.
                 self.hass.async_create_task(self.async_tick())
                 self.hass.async_create_task(self.async_apply_season_auto_select())
-                self._schedule_next_point()
 
             self._unsub_point = async_track_point_in_time(self.hass, _fire, soonest)
 
@@ -339,36 +329,63 @@ class SimpleScheduleRuntime:
             return
 
         prev_windows = self._prev_active.get(schedule.id) or set()
-        if prev_windows != cur_windows:
-            # End windows that left — fire on_end whenever leaving active
-            # (including disable mid-window). Not gated on schedule.enabled.
-            for wid in prev_windows - cur_windows:
-                window = next((w for w in schedule.windows if w.id == wid), None)
-                if window:
-                    await self._fire_action(schedule, window, "end")
-                    self.hass.bus.async_fire(
-                        EVENT_WINDOW_ENDED,
-                        {
-                            "entity_id": entity.entity_id,
-                            "schedule_id": schedule.id,
-                            "window_id": wid,
-                        },
-                    )
-            # Start newly active windows — only while enabled
-            if schedule.enabled:
-                for wid in cur_windows - prev_windows:
-                    window = next((w for w in schedule.windows if w.id == wid), None)
-                    if window:
-                        await self._fire_action(schedule, window, "start")
-                        self.hass.bus.async_fire(
-                            EVENT_WINDOW_STARTED,
-                            {
-                                "entity_id": entity.entity_id,
-                                "schedule_id": schedule.id,
-                                "window_id": wid,
-                            },
-                        )
-            self._prev_active[schedule.id] = set(cur_windows)
+        if prev_windows == cur_windows:
+            return
+        # Record before any action runs so overlapping ticks (interval, point
+        # timer, condition change) cannot fire the same transition twice.
+        self._prev_active[schedule.id] = set(cur_windows)
+        windows_by_id = {w.id: w for w in schedule.windows}
+        transitions: list[tuple[Window, str]] = []
+        # End windows that left — fire on_end whenever leaving active
+        # (including disable mid-window). Not gated on schedule.enabled.
+        for wid in prev_windows - cur_windows:
+            if wid in windows_by_id:
+                transitions.append((windows_by_id[wid], "end"))
+        # Start newly active windows — only while enabled
+        if schedule.enabled:
+            for wid in cur_windows - prev_windows:
+                if wid in windows_by_id:
+                    transitions.append((windows_by_id[wid], "start"))
+        if transitions:
+            self._queue_transitions(schedule, entity.entity_id, transitions)
+
+    def _queue_transitions(
+        self,
+        schedule: Schedule,
+        entity_id: str,
+        transitions: list[tuple[Window, str]],
+    ) -> None:
+        """Run start/end steps off the tick so waits never block evaluation.
+
+        Sequences for one schedule run in order (a window's start steps finish
+        before its end steps begin); different schedules run independently.
+        """
+        previous = self._action_tasks.get(schedule.id)
+
+        async def _run() -> None:
+            if previous is not None and not previous.done():
+                await asyncio.wait([previous])
+            for window, which in transitions:
+                await self._fire_action(schedule, window, which)
+                self.hass.bus.async_fire(
+                    EVENT_WINDOW_STARTED if which == "start" else EVENT_WINDOW_ENDED,
+                    {
+                        "entity_id": entity_id,
+                        "schedule_id": schedule.id,
+                        "window_id": window.id,
+                    },
+                )
+
+        task = self.hass.async_create_background_task(
+            _run(), f"{DOMAIN} actions {schedule.id}"
+        )
+        self._action_tasks[schedule.id] = task
+
+        def _forget(done: asyncio.Task) -> None:
+            if self._action_tasks.get(schedule.id) is done:
+                del self._action_tasks[schedule.id]
+
+        task.add_done_callback(_forget)
 
     async def _fire_action(
         self, schedule: Schedule, window: Window, which: str
@@ -459,11 +476,22 @@ class SimpleScheduleRuntime:
                         break
                     match_id = mid
             target = match_id or group.fallback_member_id
-            if target:
-                await self._exclusive_enable(group.id, target, sticky=False)
-            elif not group.require_fallback:
-                # HSCP-42: no in-season member and no fallback → leave none enabled
-                await self._exclusive_enable(group.id, None, sticky=False)
+            if not target and group.require_fallback:
+                continue
+            # No in-season member and no fallback (not required) → leave none enabled
+            if self._selection_applied(group, target):
+                continue
+            await self._exclusive_enable(group.id, target, sticky=False)
+
+    def _selection_applied(self, group: ScheduleGroup, member_id: str | None) -> bool:
+        """True when the group already has exactly ``member_id`` enabled (non-sticky)."""
+        if group.sticky or group.enabled_member_id != member_id:
+            return False
+        for mid in group.member_ids:
+            sched = self.store.get_schedule(mid)
+            if sched and sched.enabled != (member_id is not None and mid == member_id):
+                return False
+        return True
 
     async def _exclusive_enable(
         self, group_id: str, member_id: str | None, *, sticky: bool
@@ -473,12 +501,11 @@ class SimpleScheduleRuntime:
             return
         group.enabled_member_id = member_id
         group.sticky = sticky
+        # Flip member flags in place; upsert_group persists everything in one save.
         for mid in group.member_ids:
             sched = self.store.get_schedule(mid)
-            if not sched:
-                continue
-            sched.enabled = member_id is not None and mid == member_id
-            await self.store.upsert_schedule(sched)
+            if sched:
+                sched.enabled = member_id is not None and mid == member_id
         await self.store.upsert_group(group)
         await self.async_reload_entities()
         await self.async_tick()
@@ -583,7 +610,7 @@ class SimpleScheduleRuntime:
                     continue
                 data[key] = value
             data["id"] = existing.id
-            # Empty string → clear fallback / enabled (HSCP-42 optional default)
+            # Empty string → clear fallback / enabled (default member is optional)
             if data.get("fallback_member_id") == "":
                 data["fallback_member_id"] = None
             if data.get("enabled_member_id") == "":

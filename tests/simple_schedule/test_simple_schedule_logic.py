@@ -10,7 +10,7 @@ import asyncio
 import sys
 import types
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -185,7 +185,7 @@ class DateRangeSoloTests(unittest.TestCase):
         s = M.Schedule.from_dict(
             {
                 "id": "s1",
-                "name": "swag",
+                "name": "year_round",
                 "weekdays": [
                     "sun",
                     "mon",
@@ -201,11 +201,11 @@ class DateRangeSoloTests(unittest.TestCase):
         self.assertTrue(s.in_season(date(2026, 6, 15)))
         self.assertTrue(s.in_season(date(2026, 12, 25)))
 
-    def test_christmas_swag_range(self):
+    def test_winter_holiday_range(self):
         s = M.Schedule.from_dict(
             {
                 "id": "s1",
-                "name": "christmas_swag",
+                "name": "winter_holiday_lights",
                 "enabled": True,
                 "weekdays": ["sun", "mon", "tue", "wed", "thu", "fri", "sat"],
                 "windows": [clock_window("w", "16:00", "23:00")],
@@ -221,11 +221,11 @@ class DateRangeSoloTests(unittest.TestCase):
         self.assertFalse(s.in_season(date(2026, 6, 15)))
         self.assertFalse(s.in_season(date(2026, 10, 15)))
 
-    def test_pride_june_only(self):
+    def test_june_only(self):
         s = M.Schedule.from_dict(
             {
                 "id": "s1",
-                "name": "pride",
+                "name": "june_display",
                 "weekdays": ["sun", "mon", "tue", "wed", "thu", "fri", "sat"],
                 "windows": [clock_window("w", "20:00", "20:15")],
                 "date_range": {"start": "06-01", "end": "06-30", "recurs_yearly": True},
@@ -236,11 +236,11 @@ class DateRangeSoloTests(unittest.TestCase):
         self.assertFalse(s.in_season(date(2026, 5, 31)))
         self.assertFalse(s.in_season(date(2026, 7, 1)))
 
-    def test_halloween_indoor_october(self):
+    def test_october_midnight(self):
         s = M.Schedule.from_dict(
             {
                 "id": "s1",
-                "name": "halloween_indoor_midnight",
+                "name": "october_midnight",
                 "weekdays": ["sun", "mon", "tue", "wed", "thu", "fri", "sat"],
                 "windows": [clock_window("w", "00:00", "00:15")],
                 "date_range": {"start": "10-01", "end": "10-31", "recurs_yearly": True},
@@ -398,7 +398,7 @@ class FireActionWaitTests(unittest.TestCase):
 
 
 class GroupFallbackTests(unittest.TestCase):
-    """HSCP-42: groups may omit default/fallback member."""
+    """Groups may omit the default/fallback member."""
 
     def test_require_fallback_defaults_true(self):
         g = M.ScheduleGroup.from_dict({"id": "g1", "name": "Outdoor"})
@@ -412,7 +412,7 @@ class GroupFallbackTests(unittest.TestCase):
                 "name": "Seasonal only",
                 "require_fallback": False,
                 "fallback_member_id": None,
-                "member_ids": ["s_pride"],
+                "member_ids": ["s_june"],
             }
         )
         self.assertFalse(g.require_fallback)
@@ -425,8 +425,8 @@ class GroupFallbackTests(unittest.TestCase):
         """Mirror async_apply_season_auto_select target resolution."""
         seasonal = M.Schedule.from_dict(
             {
-                "id": "s_pride",
-                "name": "Pride",
+                "id": "s_june",
+                "name": "June display",
                 "season_available": True,
                 "date_range": {"start": "06-01", "end": "06-30", "recurs_yearly": True},
                 "weekdays": ["sun", "mon", "tue", "wed", "thu", "fri", "sat"],
@@ -459,7 +459,7 @@ class GroupFallbackTests(unittest.TestCase):
                     match_id = mid
             return match_id or group.fallback_member_id
 
-        self.assertEqual(resolve_target(date(2026, 6, 15)), "s_pride")
+        self.assertEqual(resolve_target(date(2026, 6, 15)), "s_june")
         # Out of season, no fallback → none (may leave none enabled)
         self.assertIsNone(resolve_target(date(2026, 11, 15)))
 

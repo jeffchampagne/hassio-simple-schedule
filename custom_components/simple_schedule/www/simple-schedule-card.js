@@ -118,13 +118,6 @@
     return which === "start" ? todayIso() : endOfMonthIso();
   }
 
-  function preferMonthDay(raw, recursYearly) {
-    const s = String(raw || "").trim();
-    if (/^\d{2}-\d{2}$/.test(s)) return true;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
-    return recursYearly !== false;
-  }
-
   function fromDateInputValue(iso, preferMd) {
     const s = String(iso || "").trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
@@ -226,7 +219,7 @@
   }
 
 
-  /** Jeff-approved user-facing errors (docs/simple-schedule-error-messages.md). */
+  /** User-facing error copy. */
   const SSC_GENERIC = "Something went wrong saving this schedule. Try again.";
   const SSC_TIME_STEPS = "Use times on 15-minute steps (e.g. 7:00, 7:15).";
   const SSC_SAME_TIME =
@@ -1100,13 +1093,6 @@
     });
   }
 
-  function scheduleIdFromEntity(entityId, state) {
-    // Prefer unique id from attributes if we stored schedule id — use object path
-    // Entities are simple_schedule.<slug>; services need schedule_id from storage.
-    // We keep schedule_id in attributes via custom — for now parse from attributes windows and use hass connection.
-    return state?.attributes?.schedule_id || null;
-  }
-
 
   function sscActionTargetEntityIds(action) {
     if (!action || typeof action !== "object") return [];
@@ -1116,11 +1102,17 @@
     return [];
   }
 
+  // hass is replaced on every HA state change; cache per (immutable) state object.
+  const sscWatchedIdsCache = new WeakMap();
+
   function sscCollectWatchedEntityIds(hass, entityId) {
+    if (!entityId) return new Set();
+    const stateObj = hass?.states?.[entityId];
+    const cached = stateObj && sscWatchedIdsCache.get(stateObj);
+    if (cached && cached.entityId === entityId) return cached.ids;
     const ids = new Set();
-    if (!entityId) return ids;
     ids.add(entityId);
-    const attrs = hass?.states?.[entityId]?.attributes || {};
+    const attrs = stateObj?.attributes || {};
     const considerAction = (a) => {
       for (const act of sscNormalizeActionList(a)) {
         for (const id of sscActionTargetEntityIds(act)) ids.add(id);
@@ -1149,6 +1141,9 @@
       // best-effort; entity_id usually on members[]
       if (typeof mid === "string" && mid) ids.add(`simple_schedule.${mid}`);
     }
+    if (stateObj && typeof stateObj === "object") {
+      sscWatchedIdsCache.set(stateObj, { entityId, ids });
+    }
     return ids;
   }
 
@@ -1156,10 +1151,12 @@
     if (force) return true;
     if (!oldHass || !newHass) return true;
     if (newHass === oldHass) return false;
-    const ids = sscCollectWatchedEntityIds(oldHass, entityId);
-    for (const id of sscCollectWatchedEntityIds(newHass, entityId)) ids.add(id);
-    for (const id of ids) {
-      if (newHass.states?.[id] !== oldHass.states?.[id]) return true;
+    const oldIds = sscCollectWatchedEntityIds(oldHass, entityId);
+    const newIds = sscCollectWatchedEntityIds(newHass, entityId);
+    for (const ids of oldIds === newIds ? [newIds] : [oldIds, newIds]) {
+      for (const id of ids) {
+        if (newHass.states?.[id] !== oldHass.states?.[id]) return true;
+      }
     }
     // Service catalog changes are rare; still refresh when identity flips.
     if (newHass.services !== oldHass.services) return true;
@@ -1175,17 +1172,6 @@ function coerceWindows(raw) {
     return [];
   }
 
-function resolveWindows(...candidates) {
-    let empty = null;
-    for (const c of candidates) {
-      const list = coerceWindows(c);
-      if (list.length) return list;
-      if (empty == null && Array.isArray(c)) empty = list;
-      else if (empty == null && c != null) empty = list;
-    }
-    return empty || [];
-  }
-
 /** Minute ranges for overlap + strip — resolves sun/mixed via boundToMinutes(hass). */
 function windowMinuteRanges(hass, w) {
     const from = w?.from || w?.start;
@@ -1199,11 +1185,6 @@ function windowMinuteRanges(hass, w) {
       [a, 1440],
       [0, b],
     ];
-  }
-
-/** @deprecated clock-only helper kept for callers/tests; prefer windowMinuteRanges. */
-function clockMinuteRanges(w) {
-    return windowMinuteRanges(null, w);
   }
 
 function rangesOverlapHalfOpen(a, b) {
@@ -1225,10 +1206,6 @@ function windowsOverlap(hass, a, b, scheduleWeekdays) {
     for (const x of ra)
       for (const y of rb) if (rangesOverlapHalfOpen(x, y)) return true;
     return false;
-  }
-
-function clockWindowsOverlap(a, b) {
-    return windowsOverlap(null, a, b, null);
   }
 
 function overlappingWindowIds(windows, hass, scheduleWeekdays) {
@@ -1394,11 +1371,6 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       }, 5000);
     }
 
-    _clearToast() {
-      if (this._toastTimer) clearTimeout(this._toastTimer);
-      this._cardToast = null;
-    }
-
     async _ssCall(service, data, opts) {
       try {
         await this.hass.callService("simple_schedule", service, data);
@@ -1434,7 +1406,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         /* Card-local accents — do not use theme --state-active-color / --primary-color for headers */
         :host {
           --ssc-accent: #5b7c8a;
-          /* Overlap accent — amber/gold #C9A227 (Jeff); not error/enabled */
+          /* Overlap accent — amber/gold #C9A227; not error/enabled */
           --ss-overlap: #c9a227;
           --ssc-on-bg: rgba(91, 124, 138, 0.14);
           --ssc-off-bg: var(--secondary-background-color);
@@ -2906,9 +2878,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
 
     async _resolveScheduleId() {
       if (this._scheduleId) return this._scheduleId;
-      // Infer from entity unique objects by matching name + windows via update using object_id path
-      // Services accept schedule_id; we also accept object_id via a helper attribute.
-      // For pilot: read from hass connection registry of states — use entity object_id as lookup key via update_schedule with schedule_id from config.
+      // Services accept storage ids, object ids, or the entity's object id.
       const eid = this._entityId;
       return this._config.schedule_id || eid?.split(".")[1];
     }
@@ -4099,10 +4069,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       const status = this._statusText();
       const now = new Date();
       const nowQ = Math.floor((now.getHours() * 60 + now.getMinutes()) / 15);
-      const hourLabels =
-        fmt === "24"
-          ? [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
-          : [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24];
+      const hourLabels = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24];
 
       const embedded = Boolean(this._config.embedded || this._config.editor_only);
       const showExpanded = embedded || this._expanded;

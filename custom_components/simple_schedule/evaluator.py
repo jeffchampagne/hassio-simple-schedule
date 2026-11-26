@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from .const import CONDITION_MATCH_ANY, CONDITION_NUMERIC_OPS, WEEKDAYS
-from .models import Schedule, ScheduleStep, TimeBound, WaitStep, Window, WindowCondition, parse_hm
+from .models import Schedule, ScheduleStep, TimeBound, Window, WindowCondition, parse_hm
 
 SUN_ATTR = {
     "dawn": "next_dawn",
@@ -269,15 +269,6 @@ def next_transition(
         return None
     candidates.sort(key=lambda c: c[0])
     return candidates[0]
-
-
-def window_action(schedule: Schedule, window: Window, which: str):
-    """Return first WindowAction | None (compat); prefer window_actions()."""
-    for step in window_actions(schedule, window, which):
-        if isinstance(step, WaitStep):
-            continue
-        return step
-    return None
 
 
 def window_actions(schedule: Schedule, window: Window, which: str) -> list[ScheduleStep]:

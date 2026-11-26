@@ -41,8 +41,6 @@ SUN_KINDS = ("dawn", "sunrise", "dusk", "sunset")
 BOUND_KINDS = ("clock",) + SUN_KINDS
 # Legacy entity-id actions only; new actions allow any domain.service (no allowlist).
 LEGACY_ACTION_DOMAINS = ("scene", "script")
-# Back-compat alias used by older call sites during transition.
-ACTION_DOMAINS = LEGACY_ACTION_DOMAINS
 
 CONDITION_OPS = ("=", "!=", "<", ">")
 CONDITION_NUMERIC_OPS = ("<", ">")

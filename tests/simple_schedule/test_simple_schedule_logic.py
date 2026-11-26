@@ -126,15 +126,22 @@ def clock_window(wid, start, end, on_start=None, on_end=None):
     }
 
 
-class ActionStepTests(unittest.TestCase):
+class ScheduleStepTests(unittest.TestCase):
+    def test_schedule_step_is_exported(self):
+        self.assertTrue(hasattr(M, "ScheduleStep"))
+        self.assertTrue(hasattr(M, "WindowAction"))
+        self.assertTrue(hasattr(M, "WaitStep"))
+
     def test_legacy_string_normalizes(self):
-        steps = M.normalize_action_steps("script.foo")
+        steps = M._validate_action_list("script.foo")
         self.assertEqual(len(steps), 1)
-        self.assertEqual(steps[0].type, "action")
-        self.assertEqual(steps[0].entity_id, "script.foo")
+        self.assertIsInstance(steps[0], M.WindowAction)
+        self.assertEqual(steps[0].service, "script.turn_on")
+        self.assertEqual(steps[0].entity_ids(), ["script.foo"])
 
     def test_wait_seconds_and_minutes(self):
-        step = M.ActionStep.from_dict({"type": "wait", "minutes": 1, "seconds": 30})
+        step = M.WaitStep.from_dict({"type": "wait", "minutes": 1, "seconds": 30})
+        self.assertIsInstance(step, M.WaitStep)
         self.assertEqual(step.type, "wait")
         self.assertEqual(step.seconds, 90)
         self.assertEqual(step.to_dict(), {"type": "wait", "seconds": 90})
@@ -145,14 +152,22 @@ class ActionStepTests(unittest.TestCase):
             {"type": "wait", "seconds": 5},
             {"type": "action", "entity_id": "script.b"},
         ]
-        steps = M.normalize_action_steps(raw)
-        stored = M.steps_to_storage(steps)
+        steps = M._validate_action_list(raw)
+        stored = [M.step_to_storage(s) for s in steps]
         self.assertEqual(
             stored,
             [
-                {"type": "action", "entity_id": "scene.a"},
+                {
+                    "service": "scene.turn_on",
+                    "target": {"entity_id": ["scene.a"]},
+                    "data": {},
+                },
                 {"type": "wait", "seconds": 5},
-                {"type": "action", "entity_id": "script.b"},
+                {
+                    "service": "script.turn_on",
+                    "target": {"entity_id": ["script.b"]},
+                    "data": {},
+                },
             ],
         )
 
@@ -161,9 +176,9 @@ class ActionStepTests(unittest.TestCase):
             clock_window("w1", "07:00", "09:00", on_start="script.x", on_end=[])
         )
         self.assertEqual(len(w.on_start), 1)
-        self.assertEqual(w.on_start[0].entity_id, "script.x")
+        self.assertIsInstance(w.on_start[0], M.WindowAction)
+        self.assertEqual(w.on_start[0].entity_ids(), ["script.x"])
         self.assertEqual(w.on_end, [])
-
 
 class DateRangeSoloTests(unittest.TestCase):
     def test_unset_year_round(self):
@@ -339,12 +354,15 @@ class WindowActionsTests(unittest.TestCase):
         )
         w = sched.windows[0]
         steps = E.window_actions(sched, w, "start")
-        self.assertEqual([s.type for s in steps], ["action", "wait", "action"])
+        self.assertEqual(len(steps), 3)
+        self.assertIsInstance(steps[0], M.WindowAction)
+        self.assertIsInstance(steps[1], M.WaitStep)
+        self.assertIsInstance(steps[2], M.WindowAction)
         self.assertEqual(steps[1].seconds, 2)
         # empty on_end → schedule defaults
-        self.assertEqual(
-            E.window_actions(sched, w, "end")[0].entity_id, "script.default_end"
-        )
+        end_steps = E.window_actions(sched, w, "end")
+        self.assertIsInstance(end_steps[0], M.WindowAction)
+        self.assertEqual(end_steps[0].entity_ids(), ["script.default_end"])
 
 
 class FireActionWaitTests(unittest.TestCase):
@@ -356,13 +374,13 @@ class FireActionWaitTests(unittest.TestCase):
 
             async def fire(steps):
                 for step in steps:
-                    if step.type == "wait":
+                    if isinstance(step, M.WaitStep):
                         await asyncio.sleep(0)  # zero in tests; asserts order
                         calls.append(("wait", step.seconds))
                     else:
-                        calls.append(("action", step.entity_id))
+                        calls.append(("action", step.entity_ids()[0]))
 
-            steps = M.normalize_action_steps(
+            steps = M._validate_action_list(
                 [
                     "script.a",
                     {"type": "wait", "seconds": 1},

@@ -10,8 +10,8 @@ from zoneinfo import ZoneInfo
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from .const import WEEKDAYS
-from .models import ActionStep, Schedule, TimeBound, Window, parse_hm
+from .const import CONDITION_MATCH_ANY, CONDITION_NUMERIC_OPS, WEEKDAYS
+from .models import Schedule, ScheduleStep, TimeBound, WaitStep, Window, WindowCondition, parse_hm
 
 SUN_ATTR = {
     "dawn": "next_dawn",
@@ -159,14 +159,61 @@ def iter_intervals(
         if not schedule.in_season(start_day):
             continue
         dow = weekday_id(start_day)
-        if dow not in schedule.weekdays:
-            continue
         for window in schedule.windows:
+            # Per-window DOW when set; otherwise inherit schedule.weekdays.
+            window_days = (
+                window.weekdays
+                if window.weekdays is not None
+                else schedule.weekdays
+            )
+            if dow not in window_days:
+                continue
             resolved = resolve_window_for_start_day(hass, window, start_day)
             if resolved:
                 out.append(resolved)
     out.sort(key=lambda i: i.start)
     return out
+
+
+def _as_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def evaluate_condition(hass: HomeAssistant, cond: WindowCondition) -> bool:
+    """Compare current entity state to expected value with = != < >."""
+    state = hass.states.get(cond.entity_id)
+    if state is None:
+        return False
+    current = state.state
+    expected = cond.state
+    op = cond.op or "="
+    if op in CONDITION_NUMERIC_OPS:
+        left = _as_number(current)
+        right = _as_number(expected)
+        if left is None or right is None:
+            return False
+        return left < right if op == "<" else left > right
+    cur_s = "" if current is None else str(current)
+    exp_s = "" if expected is None else str(expected)
+    if op == "!=":
+        return cur_s != exp_s
+    return cur_s == exp_s
+
+
+def window_conditions_match(hass: HomeAssistant, window: Window) -> bool:
+    """True when window has no conditions, or match-all/any is satisfied."""
+    conditions = list(window.conditions or [])
+    if not conditions:
+        return True
+    results = [evaluate_condition(hass, c) for c in conditions]
+    if window.condition_match == CONDITION_MATCH_ANY:
+        return any(results)
+    return all(results)
 
 
 def active_intervals(
@@ -177,11 +224,16 @@ def active_intervals(
         return []
     when = when or dt_util.now()
     local = dt_util.as_local(when)
-    # Solo / dated schedules: if today is out of season and we're not still
-    # inside an overnight window that *started* in-season, nothing is active.
-    # Overnight coverage is handled by including yesterday's start_day in
-    # iter_intervals (-1 offset) when that start day was in season.
-    return [i for i in iter_intervals(hass, schedule, local, days=2) if i.contains(local)]
+    windows_by_id = {w.id: w for w in schedule.windows}
+    out: list[ResolvedInterval] = []
+    for interval in iter_intervals(hass, schedule, local, days=2):
+        if not interval.contains(local):
+            continue
+        window = windows_by_id.get(interval.window_id)
+        if window is not None and not window_conditions_match(hass, window):
+            continue
+        out.append(interval)
+    return out
 
 
 def active_interval(
@@ -194,12 +246,21 @@ def active_interval(
 def next_transition(
     hass: HomeAssistant, schedule: Schedule, when: datetime | None = None
 ) -> tuple[datetime, str, str] | None:
-    """Return (when, 'start'|'end', window_id) of the next transition."""
+    """Return (when, 'start'|'end', window_id) of the next transition.
+
+    Only considers windows whose Conditions currently match (AND/OR).
+    Mid-window condition flips are handled by state listeners, not the
+    point timer — so we do not wake at a time-bound that would stay inactive.
+    """
     if not schedule.enabled or not schedule.windows:
         return None
     when = dt_util.as_local(when or dt_util.now())
+    windows_by_id = {w.id: w for w in schedule.windows}
     candidates: list[tuple[datetime, str, str]] = []
     for interval in iter_intervals(hass, schedule, when, days=8):
+        window = windows_by_id.get(interval.window_id)
+        if window is not None and not window_conditions_match(hass, window):
+            continue
         if interval.start > when:
             candidates.append((interval.start, "start", interval.window_id))
         if interval.end > when:
@@ -210,20 +271,19 @@ def next_transition(
     return candidates[0]
 
 
-def window_actions(
-    schedule: Schedule, window: Window, which: str
-) -> list[ActionStep]:
-    """Ordered steps for start or end (window list, else schedule defaults)."""
-    if which == "start":
-        steps = window.on_start if window.on_start else schedule.default_on_start
-    else:
-        steps = window.on_end if window.on_end else schedule.default_on_end
-    return list(steps or [])
-
-
-def window_action(schedule: Schedule, window: Window, which: str) -> str | None:
-    """First action entity id (compat helper)."""
+def window_action(schedule: Schedule, window: Window, which: str):
+    """Return first WindowAction | None (compat); prefer window_actions()."""
     for step in window_actions(schedule, window, which):
-        if step.type == "action" and step.entity_id:
-            return step.entity_id
+        if isinstance(step, WaitStep):
+            continue
+        return step
     return None
+
+
+def window_actions(schedule: Schedule, window: Window, which: str) -> list[ScheduleStep]:
+    """Return ordered steps for start/end (inherits schedule defaults)."""
+    if which == "start":
+        acts = window.on_start or schedule.default_on_start
+    else:
+        acts = window.on_end or schedule.default_on_end
+    return list(acts or [])

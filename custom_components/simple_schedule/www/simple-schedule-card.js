@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125ad require_fallback button labels + tooltips */
+/* CACHEBUST:20261125ad require-default button + Default chip tooltip */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -5946,7 +5946,11 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                                 </span>`
                               : ""}
                             ${isDefault
-                              ? html`<span class="chip default">Default</span>`
+                              ? html`<span
+                                  class="chip default"
+                                  title="This schedule window is the default for this group. That means it will become active when no other schedule applies."
+                                  >Default</span
+                                >`
                               : ""}
                           </div>`
                         : ""}
@@ -6016,7 +6020,11 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                     ? html`<div class="body">
                         ${isDefault
                           ? html`<div class="active-window-row">
-                              <span class="chip default">Default</span>
+                              <span
+                                class="chip default"
+                                title="This schedule window is the default for this group. That means it will become active when no other schedule applies."
+                                >Default</span
+                              >
                               <span class="muted" style="flex:1"
                                 >This schedule window is currently the default
                                 for this group, which means it will be active

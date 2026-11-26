@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from homeassistant.core import callback
@@ -24,8 +25,8 @@ from .const import (
     ATTR_WINDOWS,
     DOMAIN,
 )
-from .evaluator import active_interval, active_intervals, next_transition
-from .models import Schedule, ScheduleGroup, WaitStep, step_to_storage
+from .evaluator import active_intervals, next_transition
+from .models import Schedule, ScheduleGroup, step_to_storage
 
 
 class SimpleScheduleEntity(RestoreEntity, Entity):
@@ -44,6 +45,7 @@ class SimpleScheduleEntity(RestoreEntity, Entity):
         self._attr_is_on = False
         self._active_window: dict[str, Any] | None = None
         self._next_event: str | None = None
+        self.next_transition_at: datetime | None = None
 
     @property
     def state(self) -> str:
@@ -107,6 +109,7 @@ class SimpleScheduleEntity(RestoreEntity, Entity):
         else:
             self._active_window = None
         nxt = next_transition(self.hass, self.schedule)
+        self.next_transition_at = nxt[0] if nxt else None
         self._next_event = nxt[0].isoformat() if nxt else None
         if self.hass is not None:
             self.async_write_ha_state()

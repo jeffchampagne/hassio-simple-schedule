@@ -24,6 +24,10 @@ jobs:
         run: |
           python -m unittest -v tests.simple_schedule.test_simple_schedule_logic
 
+      - name: Runtime action sequencing + storage saves
+        run: |
+          python -m unittest -v tests.simple_schedule.test_runtime
+
       - name: Card schedule Edit open/close + wait helpers
         run: |
           python -m unittest -v tests.simple_schedule.test_card_schedule_edit

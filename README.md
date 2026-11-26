@@ -56,9 +56,22 @@ Home Assistant **2024.1** or newer.
 
 1. Open a dashboard → **Edit** → **Add card**.
 2. Search for **Simple Schedule Card** or **Simple Schedule Group Card**.
-3. Pick the schedule or group entity, then save.
+3. Save the card (you can leave **Entity** blank — see below).
 
 The integration also serves the card file at `/simple_schedule/simple-schedule-card.js`. After an update, if a card looks outdated, see [Troubleshooting](#troubleshooting).
+
+### Creating your first schedules
+
+**New schedules and schedule groups are created from a blank card on a dashboard** — not from **Settings → Devices & services**.
+
+After the integration is installed:
+
+1. Edit a dashboard and add a **Simple Schedule Card** (solo) or **Simple Schedule Group Card**.
+2. Leave the entity empty if you are starting fresh.
+3. On the card, enter a name and create the schedule (or group).
+4. Then set days, times, and actions on that same card.
+
+Use **Settings → Devices & services** only to **add the Simple Schedule integration** itself (one time). Day-to-day creating and editing happens on the dashboard cards.
 
 ---
 

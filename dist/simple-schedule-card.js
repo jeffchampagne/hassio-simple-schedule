@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125z schedule-overlap warning copy */
+/* CACHEBUST:20261125ae optional entity editor + group visual editor */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -319,13 +319,73 @@
     return { service: String(service), target, data };
   }
 
-  function sscNormalizeActionList(raw) {
+  function sscNormalizeWaitStep(raw) {
+    if (raw == null || typeof raw !== "object") return null;
+    const t = raw.type;
+    const looksWait =
+      t === "wait" ||
+      ((t == null || t === "") &&
+        ("seconds" in raw || "minutes" in raw) &&
+        !raw.service &&
+        !raw.action);
+    if (!looksWait) return null;
+    const secs =
+      Math.max(0, Number(raw.seconds) || 0) +
+      Math.max(0, Number(raw.minutes) || 0) * 60;
+    return { type: "wait", seconds: secs | 0 };
+  }
+
+  function sscNormalizeStep(raw) {
+    if (raw == null || raw === "" || raw === false) return null;
+    const wait = sscNormalizeWaitStep(raw);
+    if (wait) return wait;
+    // type:"action" wrapper → strip before WindowAction normalize
+    let payload = raw;
+    if (typeof raw === "object" && raw.type === "action") {
+      const { type, ...rest } = raw;
+      payload = rest;
+    }
+    const action = sscNormalizeAction(payload);
+    return action ? { type: "action", ...action } : null;
+  }
+
+  function sscNormalizeStepList(raw) {
     if (raw == null || raw === "" || raw === false) return [];
     if (Array.isArray(raw)) {
-      return raw.map(sscNormalizeAction).filter(Boolean);
+      return raw.map(sscNormalizeStep).filter(Boolean);
     }
-    const one = sscNormalizeAction(raw);
+    const one = sscNormalizeStep(raw);
     return one ? [one] : [];
+  }
+
+  /** Persist shape: waits keep type; actions stay {service,target,data} (v4-compatible). */
+  function sscStepsToStorage(steps) {
+    return (steps || [])
+      .map((s) => {
+        const step = sscNormalizeStep(s);
+        if (!step) return null;
+        if (step.type === "wait") return { type: "wait", seconds: step.seconds | 0 };
+        return {
+          service: step.service,
+          target: { ...(step.target || {}) },
+          data: { ...(step.data || {}) },
+        };
+      })
+      .filter(Boolean);
+  }
+
+  // Back-compat alias used across the card — now preserves wait steps.
+  function sscNormalizeActionList(raw) {
+    return sscNormalizeStepList(raw);
+  }
+
+  function formatWait(seconds) {
+    const s = Math.max(0, Number(seconds) || 0);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    if (m && r) return `${m}m ${r}s`;
+    if (m) return `${m}m`;
+    return `${r}s`;
   }
 
   function sscActionChipLabel(hass, action, index) {
@@ -2674,6 +2734,18 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
           border-color: var(--ssc-accent, #5b7c8a);
           background: var(--ssc-on-bg, rgba(91, 124, 138, 0.14));
         }
+        /* Pressed/ON for toggles that reuse add-new-bar (don't-require-default). */
+        button.add-new-bar.on {
+          border-style: solid;
+          border-color: var(--primary-color);
+          color: var(--text-primary-color, #fff);
+          background: var(--primary-color);
+        }
+        button.add-new-bar.on:hover {
+          border-color: var(--primary-color);
+          background: color-mix(in srgb, var(--primary-color) 88%, #000);
+          color: var(--text-primary-color, #fff);
+        }
         .blank-create {
           display: flex;
           flex-direction: column;
@@ -3240,17 +3312,17 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       if (Array.isArray(next.windows)) {
         next.windows = next.windows.map((w) => ({
           ...w,
-          on_start: sscNormalizeActionList(w.on_start),
-          on_end: sscNormalizeActionList(w.on_end),
+          on_start: sscStepsToStorage(w.on_start),
+          on_end: sscStepsToStorage(w.on_end),
           conditions: sscNormalizeConditions(w.conditions),
           condition_match: sscConditionMatchMode(w.condition_match),
         }));
       }
       if ("default_on_start" in next) {
-        next.default_on_start = sscNormalizeActionList(next.default_on_start);
+        next.default_on_start = sscStepsToStorage(next.default_on_start);
       }
       if ("default_on_end" in next) {
-        next.default_on_end = sscNormalizeActionList(next.default_on_end);
+        next.default_on_end = sscStepsToStorage(next.default_on_end);
       }
       return this._ssCall("update_schedule", {
         schedule_id: sid,
@@ -4139,7 +4211,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                       </div>
                       ${overnight
                         ? html`<div class="muted" style="font-size:0.7rem;margin-top:2px">
-                            ↺ overnight window (split bands) · DOW = start day
+                            This is an overnight schedule. All actions are based on the day the schedule starts.
                           </div>`
                         : ""}
                     </div>
@@ -4421,10 +4493,11 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
     }
 
     _beginActionEdit(windowId, field, index) {
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
       const existing = index == null ? null : list[index];
+      if (existing?.type === "wait") return;
       this._actionEditKey = this._actionEditKeyFor(
         windowId,
         field,
@@ -4454,14 +4527,18 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         this._errorLevel = "warning";
         return;
       }
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
-      const next = list.map((a) => ({
-        service: a.service,
-        target: { ...(a.target || {}) },
-        data: { ...(a.data || {}) },
-      }));
+      const next = list.map((s) =>
+        s.type === "wait"
+          ? { type: "wait", seconds: s.seconds | 0 }
+          : {
+              service: s.service,
+              target: { ...(s.target || {}) },
+              data: { ...(s.data || {}) },
+            }
+      );
       if (token === "new") next.push(draft);
       else {
         const idx = Number(token);
@@ -4470,23 +4547,23 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       }
       this._error = null;
       this._clearActionEdit();
-      this._patchWindow(windowId, { [field]: next });
+      this._patchWindow(windowId, { [field]: sscStepsToStorage(next) });
     }
 
     _removeActionAt(windowId, field, index) {
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
       const next = list.filter((_, i) => i !== index);
       if ((this._actionEditKey || "").startsWith(`${windowId}:${field}:`)) {
         this._clearActionEdit();
       }
-      this._patchWindow(windowId, { [field]: next });
+      this._patchWindow(windowId, { [field]: sscStepsToStorage(next) });
     }
 
     _reorderActions(windowId, field, fromIndex, toIndex) {
       if (fromIndex === toIndex || fromIndex == null || toIndex == null) return;
-      const list = sscNormalizeActionList(
+      const list = sscNormalizeStepList(
         (this._attrs.windows || []).find((x) => x.id === windowId)?.[field]
       );
       if (
@@ -4496,17 +4573,21 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         toIndex >= list.length
       )
         return;
-      const next = list.map((a) => ({
-        service: a.service,
-        target: { ...(a.target || {}) },
-        data: { ...(a.data || {}) },
-      }));
+      const next = list.map((s) =>
+        s.type === "wait"
+          ? { type: "wait", seconds: s.seconds | 0 }
+          : {
+              service: s.service,
+              target: { ...(s.target || {}) },
+              data: { ...(s.data || {}) },
+            }
+      );
       const [item] = next.splice(fromIndex, 1);
       next.splice(toIndex, 0, item);
       if ((this._actionEditKey || "").startsWith(`${windowId}:${field}:`)) {
         this._clearActionEdit();
       }
-      this._patchWindow(windowId, { [field]: next });
+      this._patchWindow(windowId, { [field]: sscStepsToStorage(next) });
     }
 
     _renderActionPicker(w, field, label, hint) {
@@ -5198,12 +5279,9 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       return document.createElement("simple-schedule-card-editor");
     }
 
-    static getStubConfig(hass) {
-      const entity =
-        Object.keys(hass.states).find((e) =>
-          e.startsWith("simple_schedule.") && !e.includes(".group_")
-        ) || "simple_schedule.sample_classroom_hours";
-      return { type: "custom:simple-schedule-card", entity, time_format: "12" };
+    static getStubConfig() {
+      // Leave entity blank so Add Card shows the create-schedule flow.
+      return { type: "custom:simple-schedule-card", time_format: "12" };
     }
   }
 
@@ -5255,7 +5333,11 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         _seasonErrorMemberId: { type: String },
         _memberRenameError: { type: String },
         _groupRenameError: { type: String },
+        _groupPatchError: { type: String },
         _memberSeasonOverride: {},
+        _createName: { type: String },
+        _createError: { type: String },
+        _createBusy: { type: Boolean },
       };
     }
 
@@ -5309,6 +5391,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       } catch (err) {
         const msg = sscUserError(err, opts?.ctx);
         if (opts?.inline === "add") this._addMemberError = msg;
+        else if (opts?.inline === "create") this._createError = msg;
         else if (opts?.inline === "season") {
           this._seasonError = msg;
           this._seasonErrorMemberId = opts?.memberId || null;
@@ -5326,8 +5409,9 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
     }
 
     setConfig(config) {
-      if (!config?.entity) throw new Error("entity is required");
-      this._config = config;
+      // entity is optional — blank card shows create-group empty state.
+      const cfg = config || {};
+      this._config = cfg;
       this._expandedId = null;
       this._memberEditors = {};
       this._renaming = false;
@@ -5343,14 +5427,184 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       this._newMemberYearly = true;
       this._addMemberError = null;
       this._pendingExpandName = null;
+      this._createName = this._createName || "";
+      this._createError = null;
+      this._createBusy = false;
     }
 
     getCardSize() {
-      return 6;
+      return this._config?.entity ? 6 : 4;
+    }
+
+    static getConfigElement() {
+      return document.createElement("simple-schedule-card-editor");
+    }
+
+    static getStubConfig() {
+      // Leave entity blank so Add Card shows the create-group flow.
+      return { type: "custom:simple-schedule-group-card", time_format: "12" };
     }
 
     get _state() {
-      return this.hass?.states?.[this._config.entity];
+      const eid = this._config?.entity;
+      if (!eid) return null;
+      return this.hass?.states?.[eid];
+    }
+
+    _slugifyName(name) {
+      return String(name || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 64) || "schedule_group";
+    }
+
+    async _waitForEntity(entityId, timeoutMs = 8000) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (this.hass?.states?.[entityId]) return true;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      return Boolean(this.hass?.states?.[entityId]);
+    }
+
+    async _persistLovelaceCardConfig(prevConfig, nextConfig) {
+      this.dispatchEvent(
+        new CustomEvent("config-changed", {
+          detail: { config: nextConfig },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      const lovelace =
+        this.hass?.connection &&
+        (this._getLovelace?.() ||
+          (() => {
+            let el = this;
+            while (el) {
+              if (el.lovelace) return el.lovelace;
+              el = el.parentElement || el.getRootNode?.()?.host;
+            }
+            return null;
+          })());
+      // Prefer parent solo helper when available; otherwise config-changed is enough.
+      if (!lovelace || typeof lovelace.saveConfig !== "function") return false;
+      if (lovelace.mode === "yaml") return false;
+      try {
+        const liveRoot = lovelace.rawConfig || lovelace.config;
+        if (!liveRoot) return false;
+        const clone = JSON.parse(JSON.stringify(liveRoot));
+        // Replace first blank group card, else first matching config object.
+        let replaced = false;
+        const walk = (node, parent, key) => {
+          if (replaced) return;
+          if (Array.isArray(node)) {
+            node.forEach((child, i) => walk(child, node, i));
+            return;
+          }
+          if (!node || typeof node !== "object") return;
+          const t = String(node.type || "");
+          const isGroup =
+            t === "custom:simple-schedule-group-card" ||
+            t === "simple-schedule-group-card";
+          if (isGroup && !node.entity && parent != null) {
+            parent[key] = { ...node, ...nextConfig };
+            replaced = true;
+            return;
+          }
+          for (const k of Object.keys(node)) walk(node[k], node, k);
+        };
+        walk(clone, null, null);
+        if (replaced) {
+          await lovelace.saveConfig(clone);
+          return true;
+        }
+      } catch (err) {
+        console.warn("simple-schedule-group-card: Lovelace save failed", err);
+      }
+      return false;
+    }
+
+    async _bindGroupEntity(entityId) {
+      const prevConfig = this._config || {};
+      const next = {
+        ...prevConfig,
+        type: "custom:simple-schedule-group-card",
+        entity: entityId,
+        time_format: prevConfig.time_format || "12",
+      };
+      const saved = await this._persistLovelaceCardConfig(prevConfig, next);
+      this._config = next;
+      if (!saved) {
+        console.warn(
+          "simple-schedule-group-card: bound entity in-session only; Lovelace config may need a save."
+        );
+      }
+      this.requestUpdate();
+    }
+
+    async _createGroupFromBlank() {
+      const name = String(this._createName || "").trim();
+      this._createError = null;
+      if (!name) {
+        this._createError = "Enter a name for the new schedule group.";
+        return;
+      }
+      this._createBusy = true;
+      try {
+        const slug = this._slugifyName(name);
+        const ok = await this._ssCall(
+          "create_group",
+          { name, object_id: slug },
+          { inline: "create", ctx: { create: true } }
+        );
+        if (!ok) return;
+        const entityId = `simple_schedule.group_${slug}`;
+        await this._waitForEntity(entityId);
+        this._createName = "";
+        await this._bindGroupEntity(entityId);
+      } finally {
+        this._createBusy = false;
+      }
+    }
+
+    _renderBlankGroupCreate() {
+      return html`
+        <ha-card>
+          <div class="body blank-create">
+            <h2>New Schedule Group</h2>
+            <div class="hint">
+              Create a group of schedules where only one is active at a time
+              (for example Normal, Halloween, and Christmas).
+            </div>
+            <div class="date-row name-row">
+              <span class="muted">Name</span>
+              <input
+                type="text"
+                .value=${this._createName || ""}
+                placeholder="e.g. Outdoor Lights"
+                ?disabled=${this._createBusy}
+                @input=${(e) => {
+                  this._createName = e.target.value;
+                  this._createError = null;
+                }}
+                @keydown=${(e) => {
+                  if (e.key === "Enter") this._createGroupFromBlank();
+                }}
+              />
+            </div>
+            ${sscChip(html, this._createError, "critical")}
+            <button
+              type="button"
+              class="add-new-bar"
+              ?disabled=${this._createBusy}
+              @click=${() => this._createGroupFromBlank()}
+            >
+              ${this._createBusy ? "Creating…" : "Create schedule group"}
+            </button>
+          </div>
+        </ha-card>
+      `;
     }
 
     get _groupId() {
@@ -5659,6 +5913,9 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
     }
 
     render() {
+      if (!this._config?.entity) {
+        return this._renderBlankGroupCreate();
+      }
       const st = this._state;
       if (!st) {
         return html`<ha-card
@@ -5673,6 +5930,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         rawEnabled && rawEnabled !== "none" ? rawEnabled : null;
       const requireFallback = a.require_fallback !== false;
       const dontRequire = !requireFallback;
+      const fallbackId = a.fallback_member;
 
       return html`
         <ha-card>
@@ -5863,7 +6121,11 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                                 </span>`
                               : ""}
                             ${isDefault
-                              ? html`<span class="chip default">Default</span>`
+                              ? html`<span
+                                  class="chip default"
+                                  title="This schedule window is the default for this group. That means it will become active when no other schedule applies."
+                                  >Default</span
+                                >`
                               : ""}
                           </div>`
                         : ""}
@@ -5933,7 +6195,11 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                     ? html`<div class="body">
                         ${isDefault
                           ? html`<div class="active-window-row">
-                              <span class="chip default">Default</span>
+                              <span
+                                class="chip default"
+                                title="This schedule window is the default for this group. That means it will become active when no other schedule applies."
+                                >Default</span
+                              >
                               <span class="muted" style="flex:1"
                                 >This schedule window is currently the default
                                 for this group, which means it will be active
@@ -6151,8 +6417,9 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                                   </div>
                                 `
                               : html`<div class="muted" style="margin-top:8px">
-                                  First schedule in the group becomes the
-                                  default (no season dates).
+                                  ${dontRequire
+                                    ? "First schedule starts with no default required."
+                                    : "First schedule in the group becomes the default (no season dates)."}
                                 </div>`}
                             <div class="add-actions">
                               <button
@@ -6190,6 +6457,66 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
                               Add a new schedule window
                             </button>
                           `}
+                    </div>
+                    <div
+                      style="margin-top:10px;padding-top:10px;border-top:1px solid var(--divider-color)"
+                    >
+                      ${requireFallback
+                        ? html`
+                            <div class="muted" style="font-weight:600">
+                              Default schedule
+                            </div>
+                            <div class="muted">
+                              Used when no seasonal member matches today’s date.
+                            </div>
+                            <div
+                              class="row"
+                              style="margin-top:6px;margin-bottom:10px;flex-wrap:wrap;gap:6px"
+                            >
+                              ${members.map(
+                                (m) => html`<button
+                                  type="button"
+                                  class="linkish ${fallbackId === m.id
+                                    ? "on"
+                                    : ""}"
+                                  style="padding:4px 8px;border-radius:6px;border:1px solid var(--divider-color);background:${fallbackId ===
+                                  m.id
+                                    ? "var(--primary-color)"
+                                    : "var(--card-background-color)"};color:${fallbackId ===
+                                  m.id
+                                    ? "var(--text-primary-color, #fff)"
+                                    : "var(--primary-text-color)"};cursor:pointer"
+                                  @click=${() =>
+                                    this._patchGroup({
+                                      require_fallback: true,
+                                      fallback_member_id: m.id,
+                                    })}
+                                >
+                                  ${m.name}
+                                </button>`
+                              )}
+                            </div>
+                          `
+                        : ""}
+                      <button
+                        type="button"
+                        class="add-new-bar ${dontRequire ? "on" : ""}"
+                        aria-pressed=${dontRequire ? "true" : "false"}
+                        title=${dontRequire
+                          ? "Click to require a default schedule window for this group. Default windows apply when no other schedule is active."
+                          : "Click to not require a default schedule window for this group. This will allow periods where no schedule is active for this group."}
+                        @click=${() =>
+                          this._setDontRequireDefault(!dontRequire)}
+                      >
+                        ${dontRequire
+                          ? "Require a default schedule window"
+                          : "Don't require a default schedule window"}
+                      </button>
+                      ${this._groupPatchError
+                        ? html`<div class="error" style="margin-top:8px">
+                            ${this._groupPatchError}
+                          </div>`
+                        : ""}
                     </div>
                     <button
                       type="button"
@@ -6344,8 +6671,60 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       this._addMemberError = null;
     }
 
+    async _patchGroup(patch) {
+      this._groupPatchError = null;
+      const a = this._state?.attributes || {};
+      const requireFallback =
+        patch.require_fallback !== undefined
+          ? Boolean(patch.require_fallback)
+          : a.require_fallback !== false;
+      const fallback =
+        patch.fallback_member_id !== undefined
+          ? patch.fallback_member_id
+          : a.fallback_member;
+      if (requireFallback && !fallback) {
+        this._groupPatchError =
+          "Pick a default schedule, or turn on “Don’t require a default schedule window”.";
+        return false;
+      }
+      const gid = this._groupId;
+      if (!gid) return false;
+      return await this._ssCall("update_group", {
+        group_id: gid,
+        ...patch,
+      });
+    }
+
+    async _setDontRequireDefault(on) {
+      if (on) {
+        await this._patchGroup({
+          require_fallback: false,
+          fallback_member_id: null,
+        });
+      } else {
+        const a = this._state?.attributes || {};
+        const members = a.members || [];
+        const keep =
+          a.fallback_member ||
+          members.find((m) => !m.date_range)?.id ||
+          members[0]?.id ||
+          null;
+        if (!keep) {
+          this._groupPatchError =
+            "Add a member before requiring a default schedule.";
+          return;
+        }
+        await this._patchGroup({
+          require_fallback: true,
+          fallback_member_id: keep,
+        });
+      }
+    }
+
     _isDefaultMember(m, a, members) {
       const list = members || a?.members || [];
+      // When the group does not require a default, nothing is "the Default".
+      if (a?.require_fallback === false) return false;
       if (list.length === 1) return true;
       if (a?.fallback_member === m.id) return true;
       // Undated member is the seasonal fallback when no other window matches.
@@ -6377,6 +6756,7 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
       if (gid) {
         await this._ssCall("update_group", {
           group_id: gid,
+          require_fallback: true,
           fallback_member_id: m.id,
         });
       }
@@ -6496,14 +6876,6 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
         }
       }
     }
-
-    static getStubConfig(hass) {
-      const entity =
-        Object.keys(hass.states).find((e) =>
-          e.startsWith("simple_schedule.group_")
-        ) || "simple_schedule.group_sample_outdoor_lighting";
-      return { type: "custom:simple-schedule-group-card", entity };
-    }
   }
 
   class SimpleScheduleCardEditor extends LitElement {
@@ -6570,23 +6942,27 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
     render() {
       if (!this._config) return html``;
       const fmt = this._fmt;
+      const isGroup = this._isGroupCard;
+      const entityLabel = isGroup
+        ? "Existing group (optional)"
+        : "Existing schedule (optional)";
+      const hint = isGroup
+        ? "Leave blank to create a new schedule group on the card. Pick a group entity only if you want to show one that already exists."
+        : "Leave blank to create a new schedule on the card. Pick an entity only if you want to show one that already exists.";
       return html`
         <div class="wrap">
           <div>
-            <div class="label">Entity</div>
+            <div class="label">${entityLabel}</div>
             <ha-entity-picker
               .hass=${this.hass}
               .value=${this._config.entity || ""}
               .includeDomains=${["simple_schedule"]}
-              .label=${"Entity"}
+              .label=${entityLabel}
+              .placeholder=${"Optional — leave blank for new"}
               allow-custom-entity
               @value-changed=${this._entityChanged}
             ></ha-entity-picker>
-            <div class="hint">
-              ${this._isGroupCard
-                ? "Pick a simple_schedule group entity."
-                : "Pick a simple_schedule entity."}
-            </div>
+            <div class="hint">${hint}</div>
           </div>
           <div>
             <div class="label">Time format</div>
@@ -6613,12 +6989,15 @@ function overlappingWindowIds(windows, hass, scheduleWeekdays) {
 
     _entityChanged(ev) {
       const value = ev.detail?.value ?? "";
+      // Blank is intentional for the create-new flow — do not treat as required.
       this._update({ entity: value || undefined });
     }
 
     _update(patch) {
       // Preserve YAML-only keys (e.g. schedule_id) — not shown in UI
-      this._config = { ...this._config, ...patch };
+      const next = { ...this._config, ...patch };
+      if (!next.entity) delete next.entity;
+      this._config = next;
       this.dispatchEvent(
         new CustomEvent("config-changed", {
           detail: { config: this._config },

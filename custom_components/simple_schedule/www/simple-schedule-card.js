@@ -1,4 +1,4 @@
-/* CACHEBUST:20261125x w-expand + overlap amber/chip + wait/editor (no embed.config) */
+/* CACHEBUST:20261125y sun-aware overlap #C9A227 + warn banner + add-schedule labels */
 /**
  * Simple Schedule Lovelace card (solo + group).
  * Domain: simple_schedule — no Scheduler dependency.
@@ -1126,39 +1126,57 @@ function resolveWindows(...candidates) {
     return empty || [];
   }
 
-function clockMinuteRanges(w) {
+/** Minute ranges for overlap + strip — resolves sun/mixed via boundToMinutes(hass). */
+function windowMinuteRanges(hass, w) {
     const from = w?.from || w?.start;
     const to = w?.to || w?.end;
-    if (from?.kind !== "clock" || to?.kind !== "clock") return null;
-    const a = parseHm(from.time);
-    const b = parseHm(to.time);
+    const a = boundToMinutes(hass, from);
+    const b = boundToMinutes(hass, to);
     if (a == null || b == null) return null;
     if (b > a) return [[a, b]];
+    // Overnight / wrap (sunset→sunrise, clock overnight, mixed)
     return [
       [a, 1440],
       [0, b],
     ];
   }
 
+/** @deprecated clock-only helper kept for callers/tests; prefer windowMinuteRanges. */
+function clockMinuteRanges(w) {
+    return windowMinuteRanges(null, w);
+  }
+
 function rangesOverlapHalfOpen(a, b) {
     return a[0] < b[1] && b[0] < a[1];
   }
 
-function clockWindowsOverlap(a, b) {
-    const ra = clockMinuteRanges(a);
-    const rb = clockMinuteRanges(b);
+function windowsShareDays(a, b, scheduleWeekdays) {
+    const da = effectiveWeekdays(a, scheduleWeekdays);
+    const db = effectiveWeekdays(b, scheduleWeekdays);
+    if (!da.length || !db.length) return true;
+    return da.some((d) => db.includes(d));
+  }
+
+function windowsOverlap(hass, a, b, scheduleWeekdays) {
+    if (!windowsShareDays(a, b, scheduleWeekdays)) return false;
+    const ra = windowMinuteRanges(hass, a);
+    const rb = windowMinuteRanges(hass, b);
     if (!ra || !rb) return false;
     for (const x of ra)
       for (const y of rb) if (rangesOverlapHalfOpen(x, y)) return true;
     return false;
   }
 
-function overlappingWindowIds(windows) {
+function clockWindowsOverlap(a, b) {
+    return windowsOverlap(null, a, b, null);
+  }
+
+function overlappingWindowIds(windows, hass, scheduleWeekdays) {
     const hit = new Set();
     const list = windows || [];
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
-        if (clockWindowsOverlap(list[i], list[j])) {
+        if (windowsOverlap(hass, list[i], list[j], scheduleWeekdays)) {
           hit.add(list[i].id);
           hit.add(list[j].id);
         }
@@ -1356,7 +1374,8 @@ function overlappingWindowIds(windows) {
         /* Card-local accents — do not use theme --state-active-color / --primary-color for headers */
         :host {
           --ssc-accent: #5b7c8a;
-          --ss-overlap: #e6a23c;
+          /* Overlap accent — amber/gold #C9A227; not error/enabled */
+          --ss-overlap: #c9a227;
           --ssc-on-bg: rgba(91, 124, 138, 0.14);
           --ssc-off-bg: var(--secondary-background-color);
         }
@@ -1587,6 +1606,14 @@ function overlappingWindowIds(windows) {
           z-index: 3;
         }
         
+        .window-card {
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          padding: 10px;
+          margin: 8px 0;
+          background: var(--secondary-background-color);
+        }
+        /* After .window-card so left rail / tint win over the base border shorthand */
         .window-card.overlap {
           border-left: 4px solid var(--ss-overlap);
           background: color-mix(
@@ -1599,13 +1626,23 @@ function overlappingWindowIds(windows) {
           background: color-mix(in srgb, var(--ss-overlap) 22%, transparent);
           color: var(--primary-text-color);
           border: 1px solid var(--ss-overlap);
+          font-weight: 650;
         }
-.window-card {
-          border: 1px solid var(--divider-color);
-          border-radius: 8px;
-          padding: 10px;
-          margin: 8px 0;
-          background: var(--secondary-background-color);
+        .warn-banner.overlap {
+          display: block;
+          width: 100%;
+          box-sizing: border-box;
+          margin: 8px 0 0;
+          padding: 10px 12px;
+          border-radius: 0;
+          border-left: 4px solid var(--ss-overlap);
+          background: color-mix(
+            in srgb,
+            var(--ss-overlap) 14%,
+            var(--card-background-color)
+          );
+          color: var(--primary-text-color);
+          font-size: 0.85rem;
         }
         .window-card-head {
           display: flex;
@@ -3924,13 +3961,21 @@ function overlappingWindowIds(windows) {
     }
 
     _overlapWarnFor(windows) {
-      const ids = overlappingWindowIds(windows);
+      const ids = overlappingWindowIds(
+        windows,
+        this.hass,
+        this._attrs?.weekdays
+      );
       if (!ids.size) return null;
       return "Overlapping windows — allowed, but they share hours. Indoor/outdoor usually stay on separate schedules.";
     }
 
     _overlappingIds() {
-      return overlappingWindowIds(coerceWindows(this._attrs.windows));
+      return overlappingWindowIds(
+        coerceWindows(this._attrs.windows),
+        this.hass,
+        this._attrs?.weekdays
+      );
     }
 
     _addWaitStep(windowId, field) {
@@ -4103,7 +4148,7 @@ function overlappingWindowIds(windows) {
                       ${this._adding
                         ? html`
                             <div style="margin-top:0">
-                              <strong>Add new window</strong>
+                              <strong>Add new schedule</strong>
                             </div>
                             <div style="margin-top:10px">
                               <div class="muted" style="font-weight:600">From</div>
@@ -4177,7 +4222,7 @@ function overlappingWindowIds(windows) {
                                   if (!this._error) this._adding = false;
                                 }}
                               >
-                                Add Window
+                                Add Schedule
                               </button>
                               <button
                                 type="button"
@@ -6108,7 +6153,7 @@ function overlappingWindowIds(windows) {
                                 class="primary"
                                 @click=${() => this._addGroupMember()}
                               >
-                                Add schedule
+                                Save schedule window
                               </button>
                               <button
                                 type="button"

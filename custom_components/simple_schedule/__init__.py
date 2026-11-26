@@ -30,6 +30,9 @@ from .const import (
     EVENT_ACTION_FAILED,
     EVENT_WINDOW_ENDED,
     EVENT_WINDOW_STARTED,
+    SUN_ENTITY_ID,
+    SUN_REPLAN_ATTRS,
+    TICK_INTERVAL_SECONDS,
     WEEKDAYS,
 )
 from .entity import SimpleScheduleEntity, SimpleScheduleGroupEntity
@@ -147,6 +150,8 @@ class SimpleScheduleRuntime:
         self._unsub_interval = None
         self._unsub_point = None
         self._unsub_conditions = None
+        self._unsub_sun = None
+        self._sun_attr_snapshot: tuple | None = None
         self._prev_active: dict[str, set[str]] = {}  # schedule_id -> active window ids
         # schedule_id -> latest queued action sequence (runs serialize per schedule)
         self._action_tasks: dict[str, asyncio.Task] = {}
@@ -154,13 +159,20 @@ class SimpleScheduleRuntime:
     async def async_setup(self) -> None:
         await self.async_reload_entities()
 
-    async def async_reload_entities(self) -> None:
-        """Sync store → EntityComponent (registers unique_id in entity registry)."""
+    async def async_reload_entities(self, *, publish: bool = True) -> None:
+        """Sync store → EntityComponent (registers unique_id in entity registry).
+
+        When the caller will ``async_tick()`` next, pass ``publish=False`` so
+        entities are updated in memory without a duplicate HA state write;
+        the tick's ``_publish_all`` is then the single publish.
+        """
         to_add: list[SimpleScheduleEntity | SimpleScheduleGroupEntity] = []
 
         for schedule in list(self.store.schedules.values()):
             if schedule.id in self.schedule_entities:
-                self.schedule_entities[schedule.id].apply_schedule(schedule)
+                self.schedule_entities[schedule.id].apply_schedule(
+                    schedule, write_state=publish
+                )
             else:
                 entity = SimpleScheduleEntity(schedule)
                 self.schedule_entities[schedule.id] = entity
@@ -173,7 +185,9 @@ class SimpleScheduleRuntime:
 
         for group in list(self.store.groups.values()):
             if group.id in self.group_entities:
-                self.group_entities[group.id].apply_group(group)
+                self.group_entities[group.id].apply_group(
+                    group, write_state=publish
+                )
             else:
                 entity = SimpleScheduleGroupEntity(group, self.store)
                 self.group_entities[group.id] = entity
@@ -188,7 +202,8 @@ class SimpleScheduleRuntime:
             await self.component.async_add_entities(to_add)
 
         self._refresh_condition_listeners()
-        self._publish_all()
+        if publish:
+            self._publish_all()
 
     def _condition_entity_ids(self) -> set[str]:
         ids: set[str] = set()
@@ -223,6 +238,30 @@ class SimpleScheduleRuntime:
             if entity.hass is not None:
                 entity.async_write_ha_state()
 
+    def _sun_attrs_snapshot(self) -> tuple:
+        """Values that affect sun-bound window resolution."""
+        state = self.hass.states.get(SUN_ENTITY_ID)
+        attrs = state.attributes if state is not None else {}
+        return tuple(attrs.get(key) for key in SUN_REPLAN_ATTRS)
+
+    def _ensure_sun_listener(self) -> None:
+        """Re-plan when sun next_*/today attrs change (ignores elevation churn)."""
+        if self._unsub_sun:
+            return
+        self._sun_attr_snapshot = self._sun_attrs_snapshot()
+
+        @callback
+        def _on_sun_change(_event) -> None:
+            snap = self._sun_attrs_snapshot()
+            if snap == self._sun_attr_snapshot:
+                return
+            self._sun_attr_snapshot = snap
+            self.hass.async_create_task(self.async_tick())
+
+        self._unsub_sun = async_track_state_change_event(
+            self.hass, [SUN_ENTITY_ID], _on_sun_change
+        )
+
     async def async_register_static_paths(self) -> None:
         card = card_path()
         if not card.exists():
@@ -249,8 +288,9 @@ class SimpleScheduleRuntime:
         await self.async_apply_season_auto_select()
         await self.async_tick()
         self._unsub_interval = async_track_time_interval(
-            self.hass, self.async_tick, timedelta(seconds=30)
+            self.hass, self.async_tick, timedelta(seconds=TICK_INTERVAL_SECONDS)
         )
+        self._ensure_sun_listener()
         self._schedule_next_point()
 
     async def async_stop(self) -> None:
@@ -263,6 +303,10 @@ class SimpleScheduleRuntime:
         if self._unsub_conditions:
             self._unsub_conditions()
             self._unsub_conditions = None
+        if self._unsub_sun:
+            self._unsub_sun()
+            self._unsub_sun = None
+        self._sun_attr_snapshot = None
         for task in self._action_tasks.values():
             if not task.done():
                 task.cancel()
@@ -507,7 +551,7 @@ class SimpleScheduleRuntime:
             if sched:
                 sched.enabled = member_id is not None and mid == member_id
         await self.store.upsert_group(group)
-        await self.async_reload_entities()
+        await self.async_reload_entities(publish=False)
         await self.async_tick()
 
     async def cycle_member(self, group_id: str, member_id: str) -> None:
@@ -544,7 +588,7 @@ class SimpleScheduleRuntime:
                 if group and schedule.id not in group.member_ids:
                     group.member_ids.append(schedule.id)
                     await self.store.upsert_group(group)
-            await self.async_reload_entities()
+            await self.async_reload_entities(publish=False)
             await self.async_tick()
 
         async def update_schedule(call: ServiceCall) -> None:
@@ -560,7 +604,7 @@ class SimpleScheduleRuntime:
             data["id"] = existing.id
             schedule = Schedule.from_dict(data)
             await self.store.upsert_schedule(schedule)
-            await self.async_reload_entities()
+            await self.async_reload_entities(publish=False)
             await self.async_tick()
 
         async def delete_schedule(call: ServiceCall) -> None:
@@ -586,7 +630,7 @@ class SimpleScheduleRuntime:
                 return
             schedule.enabled = enabled
             await self.store.upsert_schedule(schedule)
-            await self.async_reload_entities()
+            await self.async_reload_entities(publish=False)
             await self.async_tick()
 
         async def create_group(call: ServiceCall) -> None:

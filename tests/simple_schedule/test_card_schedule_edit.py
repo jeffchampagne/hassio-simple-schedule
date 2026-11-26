@@ -14,7 +14,10 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-CARD = ROOT / "custom_components" / "simple_schedule" / "www" / "simple-schedule-card.js"
+WWW = ROOT / "custom_components" / "simple_schedule" / "www"
+# Helpers + behaviour guards run against the editable source; HA serves the minified build.
+CARD = WWW / "simple-schedule-card.src.js"
+CARD_BUILT = WWW / "simple-schedule-card.js"
 
 OVERNIGHT_LEGEND = (
     "This is an overnight schedule. All actions are based on the day the schedule starts."
@@ -140,10 +143,16 @@ console.log("ok");
         self.assertIn("ok", proc.stdout)
 
     def test_card_parses(self):
-        proc = subprocess.run(
-            ["node", "--check", str(CARD)], capture_output=True, text=True, check=False
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for path in (CARD, CARD_BUILT):
+            proc = subprocess.run(
+                ["node", "--check", str(path)], capture_output=True, text=True, check=False
+            )
+            self.assertEqual(proc.returncode, 0, f"{path}: {proc.stderr}")
+
+    def test_built_card_is_minified(self):
+        self.assertTrue(CARD_BUILT.is_file())
+        self.assertLess(CARD_BUILT.stat().st_size, CARD.stat().st_size)
+        self.assertIn("simple-schedule-card v", CARD_BUILT.read_text(encoding="utf-8")[:80])
 
     def test_hass_relevance_filter(self):
         """Card re-renders only when its own entity or watched entities change."""
@@ -172,11 +181,19 @@ const sched = {
     }],
   },
 };
+const sun = (extra = {}) => ({
+  state: "below_horizon",
+  attributes: {
+    next_setting: "2026-11-26T22:00:00+00:00",
+    elevation: -10,
+    ...extra,
+  },
+});
 const base = {
   [eid]: sched,
   "light.porch": { state: "off" },
   "input_boolean.away": { state: "off" },
-  "sun.sun": { state: "below_horizon" },
+  "sun.sun": sun(),
   "sensor.unrelated": { state: "1" },
 };
 const services = {};
@@ -190,8 +207,11 @@ assert(sscHassRelevantChanged(hass({ "light.porch": { state: "on" } }), h0, eid,
   "action target change must re-render");
 assert(sscHassRelevantChanged(hass({ "input_boolean.away": { state: "on" } }), h0, eid, false),
   "condition entity change must re-render");
-assert(sscHassRelevantChanged(hass({ "sun.sun": { state: "above_horizon" } }), h0, eid, false),
-  "sun change must re-render for sun-bound windows");
+assert(!sscHassRelevantChanged(hass({ "sun.sun": sun({ elevation: -11 }) }), h0, eid, false),
+  "sun elevation churn must not re-render");
+assert(sscHassRelevantChanged(
+  hass({ "sun.sun": sun({ next_setting: "2026-11-26T22:01:00+00:00" }) }), h0, eid, false),
+  "sun next_* change must re-render for sun-bound windows");
 assert(sscHassRelevantChanged(hass({ [eid]: { ...sched, state: "on" } }), h0, eid, false),
   "own entity change must re-render");
 assert(sscHassRelevantChanged(hass({}), h0, eid, true), "force must re-render");
@@ -213,6 +233,73 @@ console.log("ok");
         if proc.returncode != 0:
             self.fail(f"hass relevance harness failed:\n{proc.stderr}")
         self.assertIn("ok", proc.stdout)
+
+    def test_action_fail_bus_teardown(self):
+        """One module-level subscription; last unregister tears it down."""
+        m_bus = re.search(r"const sscActionFailCards = new Set\(\);", self.src)
+        m_coerce = re.search(r"function coerceWindows\s*\(", self.src)
+        self.assertIsNotNone(m_bus)
+        self.assertIsNotNone(m_coerce)
+        helpers = self.src[m_bus.start() : m_coerce.start()]
+        script = r"""
+HELPERS
+const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+let live = 0;
+const unsubs = [];
+const makeConn = () => ({
+  subscribeEvents: async (cb, type) => {
+    live += 1;
+    assert(type === "simple_schedule_action_failed", "wrong event");
+    const unsub = () => { live -= 1; };
+    unsubs.push(unsub);
+    return unsub;
+  },
+});
+const hass = { connection: makeConn() };
+const a = { hass, seen: 0, _onActionFailed(ev) { this.seen += 1; } };
+const b = { hass, seen: 0, _onActionFailed(ev) { this.seen += 1; } };
+sscRegisterActionFailCard(a);
+sscRegisterActionFailCard(b);
+await Promise.resolve();
+await Promise.resolve();
+assert(live === 1, "expected one live subscription, got " + live);
+sscDispatchActionFailed({ data: {} });
+assert(a.seen === 1 && b.seen === 1, "fan-out failed");
+sscUnregisterActionFailCard(a);
+assert(live === 1, "bus should stay up while cards remain");
+sscUnregisterActionFailCard(b);
+assert(live === 0, "last unregister must tear down bus");
+sscRegisterActionFailCard(a);
+await Promise.resolve();
+await Promise.resolve();
+assert(live === 1, "re-register should subscribe again");
+sscUnregisterActionFailCard(a);
+assert(live === 0, "final teardown failed");
+console.log("ok");
+""".replace("HELPERS", helpers)
+        proc = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            self.fail(
+                f"action-fail bus harness failed:\nstdout={proc.stdout}\nstderr={proc.stderr}"
+            )
+        self.assertIn("ok", proc.stdout)
+
+    def test_now_timer_and_toast_cleanup_hooks(self):
+        self.assertIn("_startNowTimer", self.src)
+        self.assertIn("_stopNowTimer", self.src)
+        self.assertRegex(
+            self.src,
+            r"disconnectedCallback\(\)\s*\{[\s\S]*?_stopNowTimer\(\)",
+        )
+        # Both cards clear toast timers on disconnect.
+        self.assertGreaterEqual(
+            len(re.findall(r"clearTimeout\(this\._toastTimer\)", self.src)), 2
+        )
 
 
 if __name__ == "__main__":
